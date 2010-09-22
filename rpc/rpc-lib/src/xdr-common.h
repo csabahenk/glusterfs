@@ -40,7 +40,7 @@ enum {
 #define GLUSTER_DUMP_VERSION 1
 
 
-#if GF_DARWIN_HOST_OS
+#if defined(GF_DARWIN_HOST_OS) || defined(GF_BSD_HOST_OS)
 #define xdr_u_quad_t xdr_u_int64_t
 #define xdr_quad_t   xdr_int64_t
 #define xdr_uint32_t xdr_u_int32_t

@@ -28,6 +28,12 @@
 
 #include <rpc/rpc.h>
 
+#if defined(GF_DARWIN_HOST_OS) || defined(GF_BSD_HOST_OS)
+#define xdr_u_quad_t xdr_u_int64_t
+#define xdr_quad_t   xdr_int64_t
+#define xdr_uint32_t xdr_u_int32_t
+#define uint64_t u_int64_t
+#endif
 
 #ifdef __cplusplus
 extern "C" {

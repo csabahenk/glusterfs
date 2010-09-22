@@ -375,18 +375,24 @@ __socket_keepalive (int fd, int keepalive_intvl)
         if (keepalive_intvl == GF_USE_DEFAULT_KEEPALIVE)
                 goto done;
 
-#ifndef GF_LINUX_HOST_OS
-        ret = setsockopt (fd, IPPROTO_TCP, TCP_KEEPALIVE, &keepalive_intvl,
-                          sizeof (keepalive_intvl));
-        if (ret == -1)
-                goto err;
-#else
+#ifdef GF_LINUX_HOST_OS
         ret = setsockopt (fd, IPPROTO_TCP, TCP_KEEPIDLE, &keepalive_intvl,
                           sizeof (keepalive_intvl));
         if (ret == -1)
                 goto err;
 
         ret = setsockopt (fd, IPPROTO_TCP, TCP_KEEPINTVL, &keepalive_intvl,
+                          sizeof (keepalive_intvl));
+        if (ret == -1)
+                goto err;
+#elif defined(GF_BSD_HOST_OS)
+        keepalive_intvl = 1;
+        ret = setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive_intvl,
+                   sizeof(keepalive_intvl));
+        if (ret == -1)
+                goto err;
+#else
+        ret = setsockopt (fd, IPPROTO_TCP, TCP_KEEPALIVE, &keepalive_intvl,
                           sizeof (keepalive_intvl));
         if (ret == -1)
                 goto err;

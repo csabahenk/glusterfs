@@ -22,7 +22,9 @@
 #define _XDR_GENERIC_H
 
 #include <sys/uio.h>
-//#include <rpc/rpc.h>
+#ifdef GF_BSD_HOST_OS
+#include <rpc/rpc.h>
+#endif
 #include <rpc/xdr.h>
 
 #define xdr_decoded_remaining_addr(xdr)        ((&xdr)->x_private)

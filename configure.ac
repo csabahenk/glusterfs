@@ -377,6 +377,7 @@ case $host_os in
 	   GF_GLUSTERFS_LDFLAGS="-lexecinfo"
 	fi				      
 	BUILD_FUSE_CLIENT=no
+        FUSE_CLIENT_SUBDIR=""
 	;;
      darwin*)
         GF_HOST_OS="GF_DARWIN_HOST_OS"

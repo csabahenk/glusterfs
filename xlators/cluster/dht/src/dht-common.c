@@ -25,6 +25,8 @@
 
 /* TODO: add NS locking */
 
+#include <stdint.h>
+#include "compat-errno.h"
 #include "glusterfs.h"
 #include "xlator.h"
 #include "dht-common.h"

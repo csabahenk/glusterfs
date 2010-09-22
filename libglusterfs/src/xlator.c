@@ -376,7 +376,12 @@ _volume_option_value_validate (xlator_t *xl,
 		for (i = 0; (i < ZR_OPTION_MAX_ARRAY_SIZE) &&
 			     opt->value[i]; i++) {
                         if (fnmatch (opt->value[i], pair->value->data,
-                                     FNM_EXTMATCH) == 0) {
+#ifdef GF_BSD_HOST_OS
+                                     0
+#else
+                                     FNM_EXTMATCH
+#endif
+                                    ) == 0) {
 				ret = 0;
 				break;
 			}
