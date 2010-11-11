@@ -169,7 +169,7 @@ stat_stampfile (xlator_t *this, marker_conf_t *priv, char **status)
                         gf_log (this->name, GF_LOG_ERROR,
                                 "stat failed with %s", strerror (errno));
                 else{
-                        ret = gf_asprintf (status, "%s:%u.%u",
+                        ret = gf_asprintf (status, "1.0:%s:%u.%u",
                                            priv->volume_uuid, buf.st_ctime,
                                            ST_CTIM_NSEC (&buf)/1000);
                         if (ret == -1)
@@ -179,7 +179,7 @@ stat_stampfile (xlator_t *this, marker_conf_t *priv, char **status)
                                 "volume mark value is %s", status);
                 }
         } else {
-                ret = gf_asprintf (status, "%s:FAILURE", priv->volume_uuid);
+                ret = gf_asprintf (status, "1.0:%s:FAILURE", priv->volume_uuid);
 
                 if (ret == -1)
                         goto err;
@@ -319,13 +319,8 @@ marker_setxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         local = (marker_local_t*) frame->local;
 
-        if (op_ret == -1) {
-                gf_log (this->name, GF_LOG_ERROR,
-                        "op_ret error %s", strerror (op_errno));
-
-                if (op_errno == ENOSPC) {
-                        marker_error_handler (this);
-                }
+        if (op_ret == -1 && op_errno == ENOSPC) {
+                marker_error_handler (this);
                 done = 1;
                 goto out;
         }
@@ -335,11 +330,16 @@ marker_setxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 goto out;
         }
 
-        marker_inode_loc_fill (local->inode, &loc);
+        if (local->loc == NULL)
+                marker_inode_loc_fill (local->inode, &loc);
+        else
+                loc_copy (&loc, local->loc);
 
         marker_trav_parent (local, &loc);
 
         loc_wipe (&loc);
+
+        MARKER_LOC_WIPE (local->loc);
 
         marker_start_setxattr (frame, this);
 
@@ -371,7 +371,10 @@ marker_start_setxattr (call_frame_t *frame, xlator_t *this)
 
         ret = dict_set_static_bin (dict, key, (void *)local->timebuf, 8);
 
-        marker_inode_loc_fill (local->inode, &loc);
+        if (local->loc == NULL)
+                marker_inode_loc_fill (local->inode, &loc);
+        else
+                loc_copy (&loc, local->loc);
 
         /* do you think it's worth for an info level log? */
         gf_log (this->name, GF_LOG_INFO, "path = %s", loc.path);
@@ -462,7 +465,11 @@ marker_mkdir (call_frame_t *frame, xlator_t *this, loc_t *loc, mode_t mode,
 
         ALLOCATE_OR_GOTO (local, marker_local_t, err);
 
-        INIT_LOCAL (frame, local, loc->parent);
+        MARKER_INIT_LOCAL (frame, local, loc->inode);
+
+        ALLOCATE_OR_GOTO (local->loc, loc_t, err);
+
+        loc_copy (local->loc, loc);
 
         STACK_WIND (frame, marker_mkdir_cbk, FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->mkdir, loc, mode, params);
@@ -509,7 +516,11 @@ marker_create (call_frame_t *frame, xlator_t *this, loc_t *loc, int32_t flags,
 
         ALLOCATE_OR_GOTO (local, marker_local_t, err);
 
-        INIT_LOCAL (frame, local, loc->parent);
+        MARKER_INIT_LOCAL (frame, local, loc->inode);
+
+        ALLOCATE_OR_GOTO (local->loc, loc_t, err);
+
+        loc_copy (local->loc, loc);
 
         STACK_WIND (frame, marker_create_cbk, FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->create, loc, flags, mode, fd,
@@ -559,7 +570,7 @@ marker_writev (call_frame_t *frame,
 
         ALLOCATE_OR_GOTO (local, marker_local_t, err);
 
-        INIT_LOCAL (frame, local, fd->inode);
+        MARKER_INIT_LOCAL (frame, local, fd->inode);
 
         STACK_WIND (frame, marker_writev_cbk, FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->writev, fd, vector, count, offset,
@@ -571,6 +582,98 @@ err:
         return 0;
 }
 
+int32_t
+marker_rmdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                   int32_t op_ret, int32_t op_errno, struct iatt *preparent,
+                   struct iatt *postparent)
+{
+        int32_t             ret     = 0;
+        marker_local_t     *local   = NULL;
+
+        if (op_ret == -1) {
+                gf_log (this->name, GF_LOG_ERROR, "error occurred "
+                        "rmdir %s", strerror (op_errno));
+                ret = -1;
+        }
+
+        local = (marker_local_t *) frame->local;
+
+        frame->local = NULL;
+
+        STACK_UNWIND_STRICT (rmdir, frame, op_ret, op_errno, preparent,
+                             postparent);
+
+        update_marks (this, local, ret);
+
+        return 0;
+}
+
+int32_t
+marker_rmdir (call_frame_t *frame, xlator_t *this, loc_t *loc, int flags)
+{
+        marker_local_t  *local = NULL;
+
+        ALLOCATE_OR_GOTO (local, marker_local_t, err);
+
+        MARKER_INIT_LOCAL (frame, local, loc->parent);
+
+        STACK_WIND (frame, marker_rmdir_cbk, FIRST_CHILD(this),
+                    FIRST_CHILD(this)->fops->rmdir, loc, flags);
+        return 0;
+err:
+        STACK_UNWIND_STRICT (rmdir, frame, -1, ENOMEM, NULL, NULL);
+
+        return 0;
+}
+
+int32_t
+marker_unlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                    int32_t op_ret, int32_t op_errno, struct iatt *preparent,
+                    struct iatt *postparent)
+{
+        int32_t             ret     = 0;
+        marker_local_t     *local   = NULL;
+
+        if (op_ret == -1) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "%s occurred in unlink", strerror (op_errno));
+
+                ret = -1;
+        }
+
+        local = (marker_local_t *) frame->local;
+
+        frame->local = NULL;
+
+        STACK_UNWIND_STRICT (unlink, frame, op_ret, op_errno, preparent,
+                             postparent);
+
+        update_marks (this, local, ret);
+
+        return 0;
+}
+
+int32_t
+marker_unlink (call_frame_t *frame, xlator_t *this, loc_t *loc)
+{
+        marker_local_t  *local = NULL;
+
+        ALLOCATE_OR_GOTO (local, marker_local_t, err);
+
+        MARKER_INIT_LOCAL (frame, local, loc->inode);
+
+        ALLOCATE_OR_GOTO (local->loc, loc_t, err);
+
+        loc_copy (local->loc, loc);
+
+        STACK_WIND (frame, marker_unlink_cbk, FIRST_CHILD(this),
+                    FIRST_CHILD(this)->fops->unlink, loc);
+        return 0;
+err:
+        STACK_UNWIND_STRICT (unlink, frame, -1, ENOMEM, NULL, NULL);
+
+        return 0;
+}
 int32_t
 mem_acct_init (xlator_t *this)
 {
@@ -588,6 +691,55 @@ mem_acct_init (xlator_t *this)
         }
 
         return ret;
+}
+
+int32_t
+marker_link_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                  int32_t op_ret, int32_t op_errno, inode_t *inode,
+                  struct iatt *buf, struct iatt *preparent,
+                  struct iatt *postparent)
+{
+        int32_t             ret     = 0;
+        marker_local_t     *local   = NULL;
+
+        if (op_ret == -1) {
+                gf_log (this->name, GF_LOG_ERROR, "%s occured while "
+                        "linking a file ", strerror (op_errno));
+                ret = -1;
+        }
+
+        local = (marker_local_t *) frame->local;
+
+        frame->local = NULL;
+
+        STACK_UNWIND_STRICT (link, frame, op_ret, op_errno, inode, buf,
+                             preparent, postparent);
+
+        update_marks (this, local, ret);
+
+        return 0;
+}
+
+int32_t
+marker_link (call_frame_t *frame, xlator_t *this, loc_t *oldloc, loc_t *newloc)
+{
+        marker_local_t  *local = NULL;
+
+        ALLOCATE_OR_GOTO (local, marker_local_t, err);
+
+        MARKER_INIT_LOCAL (frame, local, oldloc->inode);
+
+        ALLOCATE_OR_GOTO (local->loc, loc_t, err);
+
+        loc_copy (local->loc, newloc);
+
+        STACK_WIND (frame, marker_link_cbk, FIRST_CHILD(this),
+                    FIRST_CHILD(this)->fops->link, oldloc, newloc);
+        return 0;
+err:
+        STACK_UNWIND_STRICT (link, frame, -1, ENOMEM, NULL, NULL, NULL, NULL);
+
+        return 0;
 }
 
 int32_t
@@ -698,7 +850,10 @@ fini (xlator_t *this)
 
 struct xlator_fops fops = {
         .create   = marker_create,
+        .unlink   = marker_unlink,
+        .link     = marker_link,
         .mkdir    = marker_mkdir,
+        .rmdir    = marker_rmdir,
         .writev   = marker_writev,
         .getxattr = marker_getxattr
 };
