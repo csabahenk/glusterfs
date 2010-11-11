@@ -24,9 +24,34 @@
 #include "xlator.h"
 #include "defaults.h"
 
+#define MARKER_XATTR_PREFIX "trusted.glusterfs"
+#define XTIME               "xtime"
+#define VOLUME_MARK         "volume-mark"
+#define VOLUME_UUID         "volume-uuid"
+#define TIMESTAMP_FILE      "timestamp-file"
+
+/*initialize the local variable*/
+#define INIT_LOCAL(_frame, _local, _inode) do {                 \
+                _frame->local = _local;                         \
+                _local->inode = inode_ref (_inode);             \
+                _local->pid = frame->root->pid;                 \
+        } while (0)
+
+/* try alloc and if it fails, goto label */
+#define ALLOCATE_OR_GOTO(var, type, label) do {                  \
+                var = GF_CALLOC (sizeof (type), 1,               \
+                                 gf_marker_mt_##type);           \
+                if (!var) {                                      \
+                        gf_log (this->name, GF_LOG_ERROR,        \
+                                "out of memory :(");             \
+                        goto label;                              \
+                }                                                \
+        } while (0)
+
 struct marker_local{
         uint32_t        timebuf[2];
         inode_t        *inode;
+        pid_t           pid;
 };
 typedef struct marker_local marker_local_t;
 

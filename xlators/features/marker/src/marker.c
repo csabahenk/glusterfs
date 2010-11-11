@@ -70,18 +70,18 @@ marker_inode_loc_fill (inode_t *inode, loc_t *loc)
 {
         char            *resolvedpath = NULL;
         inode_t         *parent       = NULL;
-        int              ret               = -EFAULT;
+        int              ret          = -EFAULT;
 
         if ((!inode) || (!loc))
                 return ret;
 
-        if ((inode) && (inode->ino == 1)){
+        if ((inode) && (inode->ino == 1)) {
                 loc->parent = NULL;
                 goto ignore_parent;
         }
 
         parent = inode_parent (inode, 0, NULL);
-        if (!parent){
+        if (!parent) {
                 goto err;
         }
 
@@ -140,6 +140,8 @@ marker_error_handler (xlator_t *this)
 
         priv = (marker_conf_t *) this->private;
 
+        unlink (priv->timestamp_file);
+
         priv->timestamp_file = NULL;
 
         return 0;
@@ -148,7 +150,8 @@ marker_error_handler (xlator_t *this)
 int32_t
 marker_free_local (marker_local_t *local)
 {
-        inode_unref (local->inode);
+        if (local->inode != NULL)
+                inode_unref (local->inode);
 
         GF_FREE (local);
 
@@ -161,23 +164,34 @@ stat_stampfile (xlator_t *this, marker_conf_t *priv, char **status)
         int32_t     ret;
         struct stat buf;
 
-        if (priv->timestamp_file != NULL){
+        if (priv->timestamp_file != NULL) {
                 if (stat (priv->timestamp_file, &buf) == -1)
-                        gf_log (this->name, GF_LOG_ERROR, "Cant stat on timestamp-file");
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "stat failed with %s", strerror (errno));
                 else{
                         ret = gf_asprintf (status, "%s:%u.%u",
-                                          priv->volume_uuid, htonl (buf.st_ctime),
-                                          htonl ( ST_CTIM_NSEC (&buf)/1000));
+                                           priv->volume_uuid, buf.st_ctime,
+                                           ST_CTIM_NSEC (&buf)/1000);
+                        if (ret == -1)
+                                goto err;
 
-                        gf_log (this->name, GF_LOG_DEBUG, "volume mark value is %s", status);
+                        gf_log (this->name, GF_LOG_DEBUG,
+                                "volume mark value is %s", status);
                 }
         } else {
                 ret = gf_asprintf (status, "%s:FAILURE", priv->volume_uuid);
+
+                if (ret == -1)
+                        goto err;
 
                 gf_log (this->name, GF_LOG_DEBUG, "volume mark value is %s", status);
         }
 
         return 0;
+err:
+        *status = NULL;
+
+        return 1;
 }
 
 int32_t
@@ -187,67 +201,93 @@ marker_getxattr_stampfile_cbk (call_frame_t *frame, xlator_t *this,
         int32_t   ret;
         dict_t   *dict = NULL;
 
-        dict = get_new_dict ();
+        if (stampfile_status == NULL){
+                STACK_UNWIND_STRICT (getxattr, frame, -1, ENOMEM, NULL);
+
+                goto out;
+        }
+
+        dict = dict_new ();
 
         ret = dict_set_str (dict, (char *)name, stampfile_status);
-        gf_log (this->name, GF_LOG_INFO, "USER:unwinding");
 
         STACK_UNWIND_STRICT (getxattr, frame, 0, 0, dict);
 
-        dict_destroy (dict);
-
+        dict_unref (dict);
+out:
         return 0;
 }
 
 int32_t
-check_user (call_frame_t *frame, xlator_t *this, const char *name)
+getxattr_key_cmp(const char *str1, char *str2)
 {
-        int32_t              ret              = 0;
-        char                *stampfile_status = NULL;
-        marker_conf_t       *priv             = NULL;
+        char   *str3 = NULL;
+        int32_t ret  = -1;
+
+        if (strcmp (str1, str2) == 0)
+                return 0;
+
+        /*There can be the case where key
+         *in this case str1 can also be
+         * user.trusted.glusterfs.volume-mark
+         * Hence, taking this also into account
+         */
+
+        gf_asprintf (&str3, "user.%s", str2);
+
+        if (strcmp (str1, str3) == 0)
+                ret = 0;
+
+        GF_FREE (str3);
+
+        return ret;
+}
+
+int32_t
+call_from_gsync (call_frame_t *frame, xlator_t *this, const char *name)
+{
+        char          *stampfile_status = NULL;
+        marker_conf_t *priv             = NULL;
+        gf_boolean_t   ret              = _gf_true;
 
         priv = (marker_conf_t *)this->private;
 
-        if (frame->root->pid != -1){        //fop not initiated by geosyn
-                ret = -1;
+        //fop not initiated by geosyn
+        if (frame->root->pid >= 0 || name == NULL ||
+            getxattr_key_cmp (name, priv->volume_mark) != 0) {
+                ret = _gf_false;
                 goto out;
         }
 
-        if (name && strcmp (name, priv->volume_mark) == 0)
-                stat_stampfile(this, priv, &stampfile_status);
-        else {
-                ret = -1;
-                goto out;
-        }
+        stat_stampfile (this, priv, &stampfile_status);
 
         marker_getxattr_stampfile_cbk (frame, this, name, stampfile_status);
-
-out:        return ret;
+out:
+        return ret;
 }
 
 int32_t
 marker_getxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                       int32_t op_ret, int32_t op_errno, dict_t *dict)
 {
-        gf_log (this->name, GF_LOG_INFO, "USER: UNWINDING");
-
         STACK_UNWIND_STRICT (getxattr, frame, op_ret, op_errno, dict);
         return 0;
 }
 
 int32_t
 marker_getxattr (call_frame_t *frame, xlator_t *this, loc_t *loc,
-                  const char *name)
+                 const char *name)
 {
-        int32_t        ret;
+        gf_boolean_t ret;
 
+        /* do you think it's worth for an info level log? */
         gf_log (this->name, GF_LOG_INFO, "USER:PID = %d", frame->root->pid);
 
-        ret = check_user (frame, this, name);
+        ret = call_from_gsync (frame, this, name);
 
-        if (ret != 0)
+        if (ret == _gf_false)
                 STACK_WIND (frame, marker_getxattr_cbk, FIRST_CHILD(this),
-                                FIRST_CHILD(this)->fops->getxattr, loc, name);
+                            FIRST_CHILD(this)->fops->getxattr, loc, name);
 
         return 0;
 }
@@ -279,18 +319,18 @@ marker_setxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         local = (marker_local_t*) frame->local;
 
-        if (op_ret == -1){
+        if (op_ret == -1) {
                 gf_log (this->name, GF_LOG_ERROR,
                         "op_ret error %s", strerror (op_errno));
 
-                if (op_errno == ENOSPC){
+                if (op_errno == ENOSPC) {
                         marker_error_handler (this);
                 }
                 done = 1;
                 goto out;
         }
 
-        if (local->inode->ino == 1){
+        if (local->inode->ino == 1) {
                 done = 1;
                 goto out;
         }
@@ -303,7 +343,8 @@ marker_setxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         marker_start_setxattr (frame, this);
 
-out:    if (done){
+out:
+        if (done) {
                 marker_setxattr_done (frame);//free frame
         }
 
@@ -332,6 +373,7 @@ marker_start_setxattr (call_frame_t *frame, xlator_t *this)
 
         marker_inode_loc_fill (local->inode, &loc);
 
+        /* do you think it's worth for an info level log? */
         gf_log (this->name, GF_LOG_INFO, "path = %s", loc.path);
 
         STACK_WIND (frame, marker_setxattr_cbk, FIRST_CHILD(this),
@@ -372,39 +414,134 @@ marker_create_frame (xlator_t *this, marker_local_t *local)
 }
 
 int32_t
-marker_writev_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                    int32_t op_ret, int32_t op_errno, struct iatt *prebuf,
-                    struct iatt *postbuf)
+update_marks (xlator_t *this, marker_local_t *local, int32_t ret)
+{
+        if (ret == -1 || local->pid < 0)
+                marker_free_local (local);
+        else {
+                marker_gettimeofday (local);
+
+                marker_create_frame (this, local);
+        }
+
+        return 0;
+}
+
+int32_t
+marker_mkdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                   int32_t op_ret, int32_t op_errno, inode_t *inode,
+                   struct iatt *buf, struct iatt *preparent,
+                   struct iatt *postparent)
 {
         int32_t             ret     = 0;
-        pid_t               pid;
         marker_local_t     *local   = NULL;
-        marker_conf_t      *priv    = NULL;
 
-        priv = (marker_conf_t *)this->private;
+        if (op_ret == -1) {
+                gf_log (this->name, GF_LOG_ERROR, "error occurred "
+                        "while Creating a file %s", strerror (op_errno));
+                ret = -1;
+        }
 
         local = (marker_local_t *) frame->local;
 
-        if (op_ret == -1){
+        frame->local = NULL;
+
+        STACK_UNWIND_STRICT (mkdir, frame, op_ret, op_errno, inode,
+                             buf, preparent, postparent);
+
+        update_marks (this, local, ret);
+
+        return 0;
+}
+
+int
+marker_mkdir (call_frame_t *frame, xlator_t *this, loc_t *loc, mode_t mode,
+               dict_t *params)
+{
+        marker_local_t  *local = NULL;
+
+        ALLOCATE_OR_GOTO (local, marker_local_t, err);
+
+        INIT_LOCAL (frame, local, loc->parent);
+
+        STACK_WIND (frame, marker_mkdir_cbk, FIRST_CHILD(this),
+                    FIRST_CHILD(this)->fops->mkdir, loc, mode, params);
+
+        return 0;
+err:
+        STACK_UNWIND_STRICT (mkdir, frame, -1, ENOMEM, NULL,
+                             NULL, NULL, NULL);
+        return 0;
+}
+
+int32_t
+marker_create_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                    int32_t op_ret, int32_t op_errno, fd_t *fd, inode_t *inode,
+                    struct iatt *buf, struct iatt *preparent,
+                    struct iatt *postparent)
+{
+        int32_t             ret     = 0;
+        marker_local_t     *local   = NULL;
+
+        if (op_ret == -1) {
+                gf_log (this->name, GF_LOG_ERROR, "error occurred "
+                        "while Creating a file %s", strerror (op_errno));
+                ret = -1;
+        }
+
+        local = (marker_local_t *) frame->local;
+
+        frame->local = NULL;
+
+        STACK_UNWIND_STRICT (create, frame, op_ret, op_errno, fd, inode, buf,
+                             preparent, postparent);
+
+        update_marks (this, local, ret);
+
+        return 0;
+}
+
+int32_t
+marker_create (call_frame_t *frame, xlator_t *this, loc_t *loc, int32_t flags,
+                mode_t mode, fd_t *fd, dict_t *params)
+{
+        marker_local_t  *local = NULL;
+
+        ALLOCATE_OR_GOTO (local, marker_local_t, err);
+
+        INIT_LOCAL (frame, local, loc->parent);
+
+        STACK_WIND (frame, marker_create_cbk, FIRST_CHILD(this),
+                    FIRST_CHILD(this)->fops->create, loc, flags, mode, fd,
+                    params);
+        return 0;
+err:
+        STACK_UNWIND_STRICT (create, frame, -1, ENOMEM, NULL, NULL, NULL, NULL, NULL);
+
+        return 0;
+}
+
+int32_t
+marker_writev_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                   int32_t op_ret, int32_t op_errno, struct iatt *prebuf,
+                   struct iatt *postbuf)
+{
+        int32_t             ret     = 0;
+        marker_local_t     *local   = NULL;
+
+        if (op_ret == -1) {
                 gf_log (this->name, GF_LOG_ERROR, "error occurred "
                         "while write, %s", strerror (op_errno));
                 ret = -1;
         }
 
-        pid = frame->root->pid;
+        local = (marker_local_t *) frame->local;
 
         frame->local = NULL;
 
         STACK_UNWIND_STRICT (writev, frame, op_ret, op_errno, prebuf, postbuf);
 
-        if (ret == -1 || pid == -1){
-                marker_free_local (local);
-        } else {
-
-                marker_gettimeofday (local);
-
-                marker_create_frame (this, local);
-        }
+        update_marks (this, local, ret);
 
         return 0;
 }
@@ -420,19 +557,17 @@ marker_writev (call_frame_t *frame,
 {
         marker_local_t  *local = NULL;
 
-        local = (marker_local_t *) GF_MALLOC (sizeof (*local),
-                                              gf_marker_mt_marker_local);
+        ALLOCATE_OR_GOTO (local, marker_local_t, err);
 
-        if (!local)
-                gf_log (this->name, GF_LOG_ERROR, "cant allocate memory");
-
-        local->inode = inode_ref (fd->inode);
-
-        frame->local = (void *) local;
+        INIT_LOCAL (frame, local, fd->inode);
 
         STACK_WIND (frame, marker_writev_cbk, FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->writev, fd, vector, count, offset,
                     iobref);
+        return 0;
+err:
+        STACK_UNWIND_STRICT (writev, frame, -1, ENOMEM, NULL, NULL);
+
         return 0;
 }
 
@@ -456,48 +591,102 @@ mem_acct_init (xlator_t *this)
 }
 
 int32_t
-init(xlator_t *this)
+init (xlator_t *this)
 {
-        dict_t *options = NULL;
-        data_t *data    = NULL;
-        int32_t ret        = 0;
-        marker_conf_t *priv = NULL;
+        dict_t        *options = NULL;
+        data_t        *data    = NULL;
+        int32_t        ret     = 0;
+        marker_conf_t *priv    = NULL;
+
+        if (!this->children) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "marker translator needs subvolume defined.");
+                return -1;
+        }
+
+        if (!this->parents) {
+                gf_log (this->name, GF_LOG_WARNING,
+                        "Volume is dangling.");
+                return -1;
+        }
 
         options = this->options;
 
-        priv = (marker_conf_t *) GF_MALLOC (sizeof (*priv), gf_marker_mt_marker_priv);
+        ALLOCATE_OR_GOTO (this->private, marker_conf_t, err);
 
-        if( (data = dict_get (options, "volume-uuid")) != NULL){
+        priv = this->private;
 
+        if( (data = dict_get (options, VOLUME_UUID)) != NULL) {
                 priv->volume_uuid = data->data;
 
-                ret = gf_asprintf (& (priv->marker_xattr),
-                                "trusted.glusterfs.%s.xtime", priv->volume_uuid);
+                ret = gf_asprintf (& (priv->marker_xattr), "%s.%s.%s",
+                                   MARKER_XATTR_PREFIX, priv->volume_uuid, XTIME);
+
+                if (ret == -1){
+                        priv->marker_xattr = NULL;
+
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "Failed to allocate memory");
+                        goto err;
+                }
 
                 gf_log (this->name, GF_LOG_DEBUG,
                         "the volume-uuid = %s", priv->volume_uuid);
         } else {
+                priv->volume_uuid = NULL;
+
                 gf_log (this->name, GF_LOG_ERROR,
                         "the volume-uuid is not found");
+
+                return -1;
         }
 
-        if ((data = dict_get (options, "timestamp-file")) != NULL){
+        if ((data = dict_get (options, TIMESTAMP_FILE)) != NULL) {
                 priv->timestamp_file = data->data;
 
-                gf_log (this->name, GF_LOG_DEBUG, "the timestamp-file is = %s", priv->timestamp_file);
+                gf_log (this->name, GF_LOG_DEBUG,
+                        "the timestamp-file is = %s",
+                        priv->timestamp_file);
 
         } else {
+                priv->timestamp_file = NULL;
+
                 gf_log (this->name, GF_LOG_INFO,
                         "the timestamp-file is not found");
+
+                goto err;
         }
 
-        ret = gf_asprintf (&priv->volume_mark, "trusted.glusterfs.volume-mark");
+        ret = gf_asprintf (&priv->volume_mark, "%s.%s",
+                           MARKER_XATTR_PREFIX, VOLUME_MARK);
 
-        this->private = (void *) priv;
-
-        gf_log (this->name, GF_LOG_INFO, "hi");
+        if (ret == -1){
+                priv->volume_mark = NULL;
+                gf_log (this->name, GF_LOG_WARNING,
+                        "Failed to allocate memory");
+                goto err;
+        }
 
         return 0;
+err:
+        if (priv == NULL)
+                goto out;
+
+        if (priv->volume_uuid != NULL)
+                GF_FREE (priv->volume_uuid);
+
+        if (priv->timestamp_file != NULL)
+                GF_FREE (priv->timestamp_file);
+
+        if (priv->marker_xattr != NULL)
+                GF_FREE (priv->marker_xattr);
+
+        if (priv->volume_mark != NULL)
+                GF_FREE (priv->volume_mark);
+
+        GF_FREE (priv);
+out:
+        return -1;
 }
 
 void
@@ -508,7 +697,8 @@ fini (xlator_t *this)
 }
 
 struct xlator_fops fops = {
-        //.create = marker_create
+        .create   = marker_create,
+        .mkdir    = marker_mkdir,
         .writev   = marker_writev,
         .getxattr = marker_getxattr
 };
