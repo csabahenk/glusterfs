@@ -23,8 +23,8 @@
 #include "mem-types.h"
 
 enum gf_marker_mem_types_ {
-        gf_marker_mt_marker_local = gf_common_mt_end + 1,
-        gf_marker_mt_marker_priv,
+        gf_marker_mt_marker_local_t = gf_common_mt_end + 1,
+        gf_marker_mt_marker_conf_t,
         gf_marker_mt_end
 };
 #endif
