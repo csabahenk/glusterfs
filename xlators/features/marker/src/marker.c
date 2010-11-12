@@ -895,6 +895,106 @@ err:
 }
 
 int32_t
+marker_symlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                     int32_t op_ret, int32_t op_errno, inode_t *inode,
+                     struct iatt *buf, struct iatt *preparent,
+                     struct iatt *postparent)
+{
+        int32_t             ret     = 0;
+        marker_local_t     *local   = NULL;
+
+        if (op_ret == -1) {
+                gf_log (this->name, GF_LOG_ERROR, "%s occured while "
+                        "creating symlinks ", strerror (op_errno));
+                ret = -1;
+        }
+
+        local = (marker_local_t *) frame->local;
+
+        frame->local = NULL;
+
+        STACK_UNWIND_STRICT (symlink, frame, op_ret, op_errno, inode, buf,
+                             preparent, postparent);
+
+        update_marks (this, local, ret);
+
+        return 0;
+}
+
+int
+marker_symlink (call_frame_t *frame, xlator_t *this, const char *linkpath,
+                 loc_t *loc, dict_t *params)
+{
+        marker_local_t  *local = NULL;
+
+        ALLOCATE_OR_GOTO (local, marker_local_t, err);
+
+        MARKER_INIT_LOCAL (frame, local, loc->inode);
+
+        ALLOCATE_OR_GOTO (local->loc, loc_t, err);
+
+        marker_loc_copy (local->loc, loc);
+
+        STACK_WIND (frame, marker_symlink_cbk, FIRST_CHILD(this),
+                    FIRST_CHILD(this)->fops->symlink, linkpath, loc, params);
+        return 0;
+err:
+        STACK_UNWIND_STRICT (symlink, frame, -1, ENOMEM, NULL,
+                                NULL, NULL, NULL);
+        return 0;
+}
+
+int32_t
+marker_mknod_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                   int32_t op_ret, int32_t op_errno, inode_t *inode,
+                   struct iatt *buf, struct iatt *preparent,
+                   struct iatt *postparent)
+{
+        int32_t             ret     = 0;
+        marker_local_t     *local   = NULL;
+
+        if (op_ret == -1) {
+                gf_log (this->name, GF_LOG_ERROR, "%s occured while "
+                        "creating symlinks ", strerror (op_errno));
+                ret = -1;
+        }
+
+        local = (marker_local_t *) frame->local;
+
+        frame->local = NULL;
+
+        STACK_UNWIND_STRICT (mknod, frame, op_ret, op_errno, inode,
+                             buf, preparent, postparent);
+
+        update_marks (this, local, ret);
+
+        return 0;
+}
+
+int
+marker_mknod (call_frame_t *frame, xlator_t *this, loc_t *loc, mode_t mode,
+               dev_t rdev, dict_t *parms)
+{
+        marker_local_t  *local = NULL;
+
+        ALLOCATE_OR_GOTO (local, marker_local_t, err);
+
+        MARKER_INIT_LOCAL (frame, local, loc->inode);
+
+        ALLOCATE_OR_GOTO (local->loc, loc_t, err);
+
+        marker_loc_copy (local->loc, loc);
+
+        STACK_WIND (frame, marker_mknod_cbk, FIRST_CHILD(this),
+                    FIRST_CHILD(this)->fops->mknod, loc, mode, rdev, parms);
+        return 0;
+err:
+        STACK_UNWIND_STRICT (mknod, frame, -1, ENOMEM, NULL,
+                             NULL, NULL, NULL);
+        return 0;
+}
+
+int32_t
 mem_acct_init (xlator_t *this)
 {
         int     ret = -1;
@@ -992,6 +1092,18 @@ init (xlator_t *this)
 
         return 0;
 err:
+        fini (this);
+
+        return -1;
+}
+
+void
+fini (xlator_t *this)
+{
+        marker_conf_t *priv = NULL;
+
+        priv = (marker_conf_t *) this->private;
+
         if (priv == NULL)
                 goto out;
 
@@ -1009,13 +1121,6 @@ err:
 
         GF_FREE (priv);
 out:
-        return -1;
-}
-
-void
-fini (xlator_t *this)
-{
-
         return ;
 }
 
@@ -1029,6 +1134,8 @@ struct xlator_fops fops = {
         .rename    = marker_rename,
         .truncate  = marker_truncate,
         .ftruncate = marker_ftruncate,
+        .symlink   = marker_symlink,
+        .mknod     = marker_mknod,
         .getxattr  = marker_getxattr
 };
 
