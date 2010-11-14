@@ -173,8 +173,6 @@ marker_error_handler (xlator_t *this)
 
         unlink (priv->timestamp_file);
 
-        priv->timestamp_file = NULL;
-
         return 0;
 }
 
@@ -195,20 +193,13 @@ stat_stampfile (xlator_t *this, marker_conf_t *priv, char **status)
         int32_t     ret;
         struct stat buf;
 
-        if (priv->timestamp_file != NULL) {
-                if (stat (priv->timestamp_file, &buf) == -1)
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "stat failed with %s", strerror (errno));
-                else{
-                        ret = gf_asprintf (status, "1.0:%s:%u.%u",
-                                           priv->volume_uuid, buf.st_ctime,
-                                           ST_CTIM_NSEC (&buf)/1000);
-                        if (ret == -1)
-                                goto err;
-
-                        gf_log (this->name, GF_LOG_DEBUG,
-                                "volume mark value is %s", status);
-                }
+        if (priv->timestamp_file != NULL &&
+            (stat (priv->timestamp_file, &buf) != -1)) {
+                ret = gf_asprintf (status, "1.0:%s:%u.%u",
+                                  priv->volume_uuid, buf.st_ctime,
+                                  ST_CTIM_NSEC (&buf)/1000);
+                if (ret == -1)
+                        goto err;
         } else {
                 ret = gf_asprintf (status, "1.0:%s:FAILURE", priv->volume_uuid);
 
@@ -275,7 +266,7 @@ getxattr_key_cmp(const char *str1, char *str2)
 }
 
 int32_t
-call_from_gsync (call_frame_t *frame, xlator_t *this, const char *name)
+call_from_channel (call_frame_t *frame, xlator_t *this, const char *name)
 {
         char          *stampfile_status = NULL;
         marker_conf_t *priv             = NULL;
@@ -283,8 +274,7 @@ call_from_gsync (call_frame_t *frame, xlator_t *this, const char *name)
 
         priv = (marker_conf_t *)this->private;
 
-        //fop not initiated by geosyn
-        if (frame->root->pid >= 0 || name == NULL ||
+        if (frame->root->pid != -1 || name == NULL ||
             getxattr_key_cmp (name, priv->volume_mark) != 0) {
                 ret = _gf_false;
                 goto out;
@@ -314,7 +304,7 @@ marker_getxattr (call_frame_t *frame, xlator_t *this, loc_t *loc,
         /* do you think it's worth for an info level log? */
         gf_log (this->name, GF_LOG_INFO, "USER:PID = %d", frame->root->pid);
 
-        ret = call_from_gsync (frame, this, name);
+        ret = call_from_channel (frame, this, name);
 
         if (ret == _gf_false)
                 STACK_WIND (frame, marker_getxattr_cbk, FIRST_CHILD(this),
@@ -1059,7 +1049,8 @@ init (xlator_t *this)
                 priv->volume_uuid = NULL;
 
                 gf_log (this->name, GF_LOG_ERROR,
-                        "the volume-uuid is not found");
+                        "please specify the volume-uuid"
+                        "in the translator options");
 
                 return -1;
         }
@@ -1074,14 +1065,14 @@ init (xlator_t *this)
         } else {
                 priv->timestamp_file = NULL;
 
-                gf_log (this->name, GF_LOG_INFO,
-                        "the timestamp-file is not found");
+                gf_log (this->name, GF_LOG_ERROR,
+                        "please specify the timestamp-file"
+                        "in the translator options");
 
                 goto err;
         }
 
-        ret = gf_asprintf (&priv->volume_mark, "%s.%s",
-                           MARKER_XATTR_PREFIX, VOLUME_MARK);
+        ret = gf_asprintf (&priv->volume_mark, MARKER_XATTR_PREFIX "." VOLUME_MARK);
 
         if (ret == -1){
                 priv->volume_mark = NULL;
