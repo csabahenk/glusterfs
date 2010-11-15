@@ -69,7 +69,6 @@ struct marker_conf{
         char        *volume_uuid;
         char        *timestamp_file;
         char        *marker_xattr;
-        char        *volume_mark;
 };
 
 typedef struct marker_conf marker_conf_t;
