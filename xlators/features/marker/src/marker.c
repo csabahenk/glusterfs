@@ -193,8 +193,9 @@ stat_stampfile (xlator_t *this, marker_conf_t *priv, char **status)
         int32_t     ret;
         struct stat buf;
 
-        if (priv->timestamp_file != NULL &&
-            (stat (priv->timestamp_file, &buf) != -1)) {
+        GF_ASSERT (!priv->timestamp_file);
+
+        if (stat (priv->timestamp_file, &buf) != -1) {
                 ret = gf_asprintf (status, "1.0:%s:%u.%u",
                                   priv->volume_uuid, buf.st_ctime,
                                   ST_CTIM_NSEC (&buf)/1000);
@@ -241,32 +242,7 @@ out:
 }
 
 int32_t
-getxattr_key_cmp(const char *str1, char *str2)
-{
-        char   *str3 = NULL;
-        int32_t ret  = -1;
-
-        if (strcmp (str1, str2) == 0)
-                return 0;
-
-        /*There can be the case where key
-         *in this case str1 can also be
-         * user.trusted.glusterfs.volume-mark
-         * Hence, taking this also into account
-         */
-
-        gf_asprintf (&str3, "user.%s", str2);
-
-        if (strcmp (str1, str3) == 0)
-                ret = 0;
-
-        GF_FREE (str3);
-
-        return ret;
-}
-
-int32_t
-call_from_channel (call_frame_t *frame, xlator_t *this, const char *name)
+call_from_special_client (call_frame_t *frame, xlator_t *this, const char *name)
 {
         char          *stampfile_status = NULL;
         marker_conf_t *priv             = NULL;
@@ -275,7 +251,7 @@ call_from_channel (call_frame_t *frame, xlator_t *this, const char *name)
         priv = (marker_conf_t *)this->private;
 
         if (frame->root->pid != -1 || name == NULL ||
-            getxattr_key_cmp (name, priv->volume_mark) != 0) {
+            strcmp (name, MARKER_XATTR_PREFIX "." VOLUME_MARK) != 0) {
                 ret = _gf_false;
                 goto out;
         }
@@ -302,9 +278,9 @@ marker_getxattr (call_frame_t *frame, xlator_t *this, loc_t *loc,
         gf_boolean_t ret;
 
         /* do you think it's worth for an info level log? */
-        gf_log (this->name, GF_LOG_INFO, "USER:PID = %d", frame->root->pid);
+        gf_log (this->name, GF_LOG_DEBUG, "USER:PID = %d", frame->root->pid);
 
-        ret = call_from_channel (frame, this, name);
+        ret = call_from_special_client (frame, this, name);
 
         if (ret == _gf_false)
                 STACK_WIND (frame, marker_getxattr_cbk, FIRST_CHILD(this),
@@ -398,7 +374,7 @@ marker_start_setxattr (call_frame_t *frame, xlator_t *this)
                 marker_loc_copy (&loc, local->loc);
 
         /* do you think it's worth for an info level log? */
-        gf_log (this->name, GF_LOG_INFO, "path = %s", loc.path);
+        gf_log (this->name, GF_LOG_DEBUG, "path = %s", loc.path);
 
         STACK_WIND (frame, marker_setxattr_cbk, FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->setxattr, &loc, dict, 0);
@@ -1072,15 +1048,6 @@ init (xlator_t *this)
                 goto err;
         }
 
-        ret = gf_asprintf (&priv->volume_mark, MARKER_XATTR_PREFIX "." VOLUME_MARK);
-
-        if (ret == -1){
-                priv->volume_mark = NULL;
-                gf_log (this->name, GF_LOG_WARNING,
-                        "Failed to allocate memory");
-                goto err;
-        }
-
         return 0;
 err:
         fini (this);
@@ -1106,9 +1073,6 @@ fini (xlator_t *this)
 
         if (priv->marker_xattr != NULL)
                 GF_FREE (priv->marker_xattr);
-
-        if (priv->volume_mark != NULL)
-                GF_FREE (priv->volume_mark);
 
         GF_FREE (priv);
 out:
