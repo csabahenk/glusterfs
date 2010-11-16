@@ -26,6 +26,9 @@
 #include "marker.h"
 #include "marker-mem-types.h"
 
+void
+fini (xlator_t *this);
+
 int32_t
 marker_start_setxattr (call_frame_t *, xlator_t *);
 
@@ -277,7 +280,6 @@ marker_getxattr (call_frame_t *frame, xlator_t *this, loc_t *loc,
 {
         gf_boolean_t ret;
 
-        /* do you think it's worth for an info level log? */
         gf_log (this->name, GF_LOG_DEBUG, "USER:PID = %d", frame->root->pid);
 
         ret = call_from_special_client (frame, this, name);
@@ -307,8 +309,8 @@ marker_setxattr_done (call_frame_t *frame)
 }
 
 int
-marker_setxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                      int32_t op_ret, int32_t op_errno)
+marker_specific_setxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                              int32_t op_ret, int32_t op_errno)
 {
         int32_t         done = 0;
         marker_local_t *local = NULL;
@@ -342,7 +344,7 @@ marker_setxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 out:
         if (done) {
-                marker_setxattr_done (frame);//free frame
+                marker_setxattr_done (frame);
         }
 
         return 0;
@@ -373,13 +375,12 @@ marker_start_setxattr (call_frame_t *frame, xlator_t *this)
         else
                 marker_loc_copy (&loc, local->loc);
 
-        /* do you think it's worth for an info level log? */
         gf_log (this->name, GF_LOG_DEBUG, "path = %s", loc.path);
 
-        STACK_WIND (frame, marker_setxattr_cbk, FIRST_CHILD(this),
+        STACK_WIND (frame, marker_specific_setxattr_cbk, FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->setxattr, &loc, dict, 0);
 
-        loc_wipe (&loc); //when to free dict
+        loc_wipe (&loc);
 
         dict_unref (dict);
 
@@ -961,6 +962,225 @@ err:
 }
 
 int32_t
+marker_setxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                      int32_t op_ret, int32_t op_errno)
+{
+        int32_t             ret     = 0;
+        marker_local_t     *local   = NULL;
+
+        if (op_ret == -1) {
+                gf_log (this->name, GF_LOG_ERROR, "%s occured while "
+                        "creating symlinks ", strerror (op_errno));
+                ret = -1;
+        }
+
+        local = (marker_local_t *) frame->local;
+
+        frame->local = NULL;
+
+        STACK_UNWIND_STRICT (setxattr, frame, op_ret, op_errno);
+
+        update_marks (this, local, ret);
+
+        return 0;
+}
+
+int32_t
+marker_setxattr (call_frame_t *frame, xlator_t *this, loc_t *loc, dict_t *dict,
+                  int32_t flags)
+{
+        marker_local_t  *local = NULL;
+
+        ALLOCATE_OR_GOTO (local, marker_local_t, err);
+
+        MARKER_INIT_LOCAL (frame, local, loc->inode);
+
+        STACK_WIND (frame, marker_setxattr_cbk, FIRST_CHILD(this),
+                    FIRST_CHILD(this)->fops->setxattr, loc, dict, flags);
+        return 0;
+err:
+        STACK_UNWIND_STRICT (setxattr, frame, -1, ENOMEM);
+
+        return 0;
+}
+
+int32_t
+marker_fsetxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                       int32_t op_ret, int32_t op_errno)
+{
+        int32_t             ret     = 0;
+        marker_local_t     *local   = NULL;
+
+        if (op_ret == -1) {
+                gf_log (this->name, GF_LOG_ERROR, "%s occured while "
+                        "creating symlinks ", strerror (op_errno));
+                ret = -1;
+        }
+
+        local = (marker_local_t *) frame->local;
+
+        frame->local = NULL;
+
+        STACK_UNWIND_STRICT (fsetxattr, frame, op_ret, op_errno);
+
+        update_marks (this, local, ret);
+
+        return 0;
+}
+
+int32_t
+marker_fsetxattr (call_frame_t *frame, xlator_t *this, fd_t *fd, dict_t *dict,
+                   int32_t flags)
+{
+        marker_local_t  *local = NULL;
+
+        ALLOCATE_OR_GOTO (local, marker_local_t, err);
+
+        MARKER_INIT_LOCAL (frame, local, fd->inode);
+
+        STACK_WIND (frame, marker_fsetxattr_cbk, FIRST_CHILD(this),
+                    FIRST_CHILD(this)->fops->fsetxattr, fd, dict, flags);
+        return 0;
+err:
+        STACK_UNWIND_STRICT (fsetxattr, frame, -1, ENOMEM);
+
+        return 0;
+}
+
+int32_t
+marker_fsetattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                      int32_t op_ret, int32_t op_errno, struct iatt *statpre,
+                      struct iatt *statpost)
+{
+        int32_t             ret     = 0;
+        marker_local_t     *local   = NULL;
+
+        if (op_ret == -1) {
+                gf_log (this->name, GF_LOG_ERROR, "%s occured while "
+                        "creating symlinks ", strerror (op_errno));
+                ret = -1;
+        }
+
+        local = (marker_local_t *) frame->local;
+
+        frame->local = NULL;
+
+        STACK_UNWIND_STRICT (fsetattr, frame, op_ret, op_errno, statpre,
+                             statpost);
+
+        update_marks (this, local, ret);
+
+        return 0;
+}
+
+int32_t
+marker_fsetattr (call_frame_t *frame, xlator_t *this, fd_t *fd,
+                  struct iatt *stbuf, int32_t valid)
+{
+        marker_local_t  *local = NULL;
+
+        ALLOCATE_OR_GOTO (local, marker_local_t, err);
+
+        MARKER_INIT_LOCAL (frame, local, fd->inode);
+
+        STACK_WIND (frame, marker_fsetattr_cbk, FIRST_CHILD (this),
+                    FIRST_CHILD (this)->fops->fsetattr, fd, stbuf, valid);
+        return 0;
+err:
+        STACK_UNWIND_STRICT (fsetattr, frame, -1, ENOMEM, NULL, NULL);
+
+        return 0;
+}
+
+int32_t
+marker_setattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                     int32_t op_ret, int32_t op_errno, struct iatt *statpre,
+                     struct iatt *statpost)
+{
+        int32_t             ret     = 0;
+        marker_local_t     *local   = NULL;
+
+        if (op_ret == -1) {
+                gf_log (this->name, GF_LOG_ERROR, "%s occured while "
+                        "creating symlinks ", strerror (op_errno));
+                ret = -1;
+        }
+
+        local = (marker_local_t *) frame->local;
+
+        frame->local = NULL;
+
+        STACK_UNWIND_STRICT (setattr, frame, op_ret, op_errno, statpre,
+                             statpost);
+
+        update_marks (this, local, ret);
+
+        return 0;
+}
+
+int32_t
+marker_setattr (call_frame_t *frame, xlator_t *this, loc_t *loc,
+                 struct iatt *stbuf, int32_t valid)
+{
+        marker_local_t  *local = NULL;
+
+        ALLOCATE_OR_GOTO (local, marker_local_t, err);
+
+        MARKER_INIT_LOCAL (frame, local, loc->inode);
+
+        STACK_WIND (frame, marker_setattr_cbk, FIRST_CHILD (this),
+                    FIRST_CHILD (this)->fops->setattr, loc, stbuf, valid);
+        return 0;
+err:
+        STACK_UNWIND_STRICT (setattr, frame, -1, ENOMEM, NULL, NULL);
+
+        return 0;
+}
+
+int32_t
+marker_removexattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                         int32_t op_ret, int32_t op_errno)
+{
+        int32_t             ret     = 0;
+        marker_local_t     *local   = NULL;
+
+        if (op_ret == -1) {
+                gf_log (this->name, GF_LOG_ERROR, "%s occured while "
+                        "creating symlinks ", strerror (op_errno));
+                ret = -1;
+        }
+
+        local = (marker_local_t *) frame->local;
+
+        frame->local = NULL;
+
+        STACK_UNWIND_STRICT (removexattr, frame, op_ret, op_errno);
+
+        update_marks (this, local, ret);
+
+        return 0;
+}
+
+int32_t
+marker_removexattr (call_frame_t *frame, xlator_t *this, loc_t *loc,
+                     const char *name)
+{
+        marker_local_t  *local = NULL;
+
+        ALLOCATE_OR_GOTO (local, marker_local_t, err);
+
+        MARKER_INIT_LOCAL (frame, local, loc->inode);
+
+        STACK_WIND (frame, marker_removexattr_cbk, FIRST_CHILD(this),
+                    FIRST_CHILD(this)->fops->removexattr, loc, name);
+        return 0;
+err:
+        STACK_UNWIND_STRICT (removexattr, frame, -1, ENOMEM);
+
+        return 0;
+}
+
+int32_t
 mem_acct_init (xlator_t *this)
 {
         int     ret = -1;
@@ -1080,18 +1300,23 @@ out:
 }
 
 struct xlator_fops fops = {
-        .create    = marker_create,
-        .unlink    = marker_unlink,
-        .link      = marker_link,
-        .mkdir     = marker_mkdir,
-        .rmdir     = marker_rmdir,
-        .writev    = marker_writev,
-        .rename    = marker_rename,
-        .truncate  = marker_truncate,
-        .ftruncate = marker_ftruncate,
-        .symlink   = marker_symlink,
-        .mknod     = marker_mknod,
-        .getxattr  = marker_getxattr
+        .create      = marker_create,
+        .unlink      = marker_unlink,
+        .link        = marker_link,
+        .mkdir       = marker_mkdir,
+        .rmdir       = marker_rmdir,
+        .writev      = marker_writev,
+        .rename      = marker_rename,
+        .truncate    = marker_truncate,
+        .ftruncate   = marker_ftruncate,
+        .symlink     = marker_symlink,
+        .mknod       = marker_mknod,
+        .setxattr    = marker_setxattr,
+        .fsetxattr   = marker_fsetxattr,
+        .setattr     = marker_setattr,
+        .fsetattr    = marker_fsetattr,
+        .removexattr = marker_removexattr,
+        .getxattr    = marker_getxattr
 };
 
 struct xlator_cbks cbks = {
