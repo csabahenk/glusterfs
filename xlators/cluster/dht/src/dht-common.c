@@ -27,11 +27,13 @@
 
 #include "glusterfs.h"
 #include "xlator.h"
+#include "libxlator.h"
 #include "dht-common.h"
 #include "defaults.h"
 
 #include <sys/time.h>
 #include <libgen.h>
+
 
 /* TODO:
    - use volumename in xattr instead of "dht"
@@ -1834,6 +1836,49 @@ out:
         return 0;
 }
 
+int32_t
+dht_markerxtime_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                     int op_ret, int op_errno, dict_t *dict)
+{
+        dht_local_t *local = NULL;
+        dht_conf_t      *priv = NULL;
+
+        if (!this || !frame || !frame->local || !cookie) {
+                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
+                goto out;
+        }
+
+
+        local = frame->local;
+        priv = this->private;
+        cluster_markerxtime_cbk (frame, cookie, this, op_ret, op_errno, dict,
+                                &local->marker, priv->vol_uuid);
+out:
+return 0;
+}
+
+int32_t
+dht_markeruuid_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                     int op_ret, int op_errno, dict_t *dict)
+{
+        dht_local_t *local = NULL;
+        dht_conf_t      *priv = NULL;
+
+
+        if (!this || !frame || !frame->local || !cookie) {
+                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
+                goto out;
+        }
+
+
+        local = frame->local;
+        priv = this->private;
+        cluster_markeruuid_cbk (frame, cookie, this, op_ret, op_errno, dict,
+                                &local->marker, priv->vol_uuid);
+out:
+return 0;
+}
+
 
 int
 dht_getxattr (call_frame_t *frame, xlator_t *this,
@@ -1864,6 +1909,14 @@ dht_getxattr (call_frame_t *frame, xlator_t *this,
                 gf_log (this->name, GF_LOG_ERROR,
                         "layout is NULL");
                 op_errno = ENOENT;
+                goto err;
+        }
+
+        local = dht_local_init (frame);
+        if (!local) {
+                op_errno = ENOMEM;
+                gf_log (this->name, GF_LOG_ERROR,
+                       "Out of memory");
                 goto err;
         }
 
@@ -1959,12 +2012,27 @@ dht_getxattr (call_frame_t *frame, xlator_t *this,
                 goto err;
         }
 
-        local = dht_local_init (frame);
-        if (!local) {
-                op_errno = ENOMEM;
-                gf_log (this->name, GF_LOG_ERROR,
-                       "Out of memory");
-                goto err;
+        if (key && (strcmp (GF_XATTR_MARKER_KEY, key) == 0)) {
+                local->marker.call_count = conf->subvolume_cnt;
+                if (cluster_getmarkerattr (frame, this, loc, key, &local->marker,
+                                       conf->vol_uuid, dht_markeruuid_cbk)) {
+                        op_errno = EINVAL;
+                        goto err;
+                }
+
+                return 0;
+        }
+
+        if (key && *conf->vol_uuid) {
+                if (match_uuid_local (key, conf->vol_uuid) == 0) {
+                        local->marker.call_count = conf->subvolume_cnt;
+                        if (cluster_getmarkerattr (frame, this, loc, key, &local->marker,
+                                                   conf->vol_uuid, dht_markerxtime_cbk)) {
+                                op_errno = EINVAL;
+                                goto err;
+                        }
+                        return 0;
+                }
         }
 
         ret = loc_dup (loc, &local->loc);
