@@ -34,6 +34,7 @@
  */
 
 #include "stripe.h"
+#include "libxlator.h"
 
 void
 stripe_local_wipe (stripe_local_t *local)
@@ -3914,6 +3915,7 @@ init (xlator_t *this)
         priv->nodes_down = priv->child_count;
         this->private = priv;
 
+
         ret = 0;
 out:
         if (ret) {
@@ -3961,6 +3963,116 @@ out:
 }
 
 
+int32_t
+stripe_markerxtime_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                     int op_ret, int op_errno, dict_t *dict)
+{
+        stripe_local_t *local = NULL;
+        stripe_private_t      *priv = NULL;
+
+        if (!this || !frame || !frame->local || !cookie) {
+                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
+                goto out;
+        }
+
+
+        local = frame->local;
+        priv = this->private;
+        cluster_markerxtime_cbk (frame, cookie, this, op_ret, op_errno, dict,
+                                &local->marker, priv->vol_uuid);
+out:
+return 0;
+}
+
+
+int32_t
+stripe_markeruuid_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                     int op_ret, int op_errno, dict_t *dict)
+{
+        stripe_local_t *local = NULL;
+        stripe_private_t      *priv = NULL;
+
+
+        if (!this || !frame || !frame->local || !cookie) {
+                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
+                goto out;
+        }
+
+
+        local = frame->local;
+        priv = this->private;
+        cluster_markeruuid_cbk (frame, cookie, this, op_ret, op_errno, dict,
+                                &local->marker, priv->vol_uuid);
+out:
+return 0;
+}
+
+
+int32_t
+stripe_getxattr (call_frame_t *frame, xlator_t *this,
+              loc_t *loc, const char *name)
+{
+        stripe_local_t   *local = NULL;
+        xlator_list_t    *trav = NULL;
+        stripe_private_t *priv = NULL;
+        int32_t           op_errno = EINVAL;
+
+        VALIDATE_OR_GOTO (frame, err);
+        VALIDATE_OR_GOTO (this, err);
+        VALIDATE_OR_GOTO (loc, err);
+        VALIDATE_OR_GOTO (loc->path, err);
+        VALIDATE_OR_GOTO (loc->inode, err);
+
+        priv = this->private;
+        trav = this->children;
+
+        /* Initialization */
+        local = GF_CALLOC (1, sizeof (stripe_local_t),
+                           gf_stripe_mt_stripe_local_t);
+        if (!local) {
+                op_errno = ENOMEM;
+                goto err;
+        }
+        local->op_ret = -1;
+        frame->local = local;
+        loc_copy (&local->loc, loc);
+
+        if (name && (strcmp (GF_XATTR_MARKER_KEY, name) == 0)) {
+                local->marker.call_count = priv->child_count;
+                if (cluster_getmarkerattr (frame, this, loc, name, &local->marker,
+                                       priv->vol_uuid, stripe_markeruuid_cbk)) {
+                        op_errno = EINVAL;
+                        goto err;
+                }
+
+                return 0;
+        }
+
+        if (*priv->vol_uuid) {
+                if (match_uuid_local (name, priv->vol_uuid) == 0) {
+                        local->marker.call_count = priv->child_count;
+                        if (cluster_getmarkerattr (frame, this, loc, name, &local->marker,
+                                                   priv->vol_uuid, stripe_markerxtime_cbk)) {
+                                op_errno = EINVAL;
+                                goto err;
+                        }
+                        return 0;
+                }
+        }
+
+
+        STACK_WIND (frame, default_getxattr_cbk, FIRST_CHILD(this),
+                    FIRST_CHILD(this)->fops->getxattr, loc, name);
+
+        return 0;
+
+err:
+        STACK_UNWIND_STRICT (getxattr, frame, -1, op_errno, NULL);
+        return 0;
+}
+
+
+
 struct xlator_fops fops = {
         .stat        = stripe_stat,
         .unlink      = stripe_unlink,
@@ -3985,6 +4097,8 @@ struct xlator_fops fops = {
         .fsetattr    = stripe_fsetattr,
         .lookup      = stripe_lookup,
         .mknod       = stripe_mknod,
+
+        .getxattr    = stripe_getxattr,
 };
 
 struct xlator_cbks cbks = {

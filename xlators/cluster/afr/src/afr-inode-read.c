@@ -657,6 +657,49 @@ out:
 }
 
 int32_t
+afr_markerxtime_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                     int op_ret, int op_errno, dict_t *dict)
+{
+        afr_local_t *local = NULL;
+        afr_private_t      *priv = NULL;
+
+        if (!this || !frame || !frame->local || !cookie) {
+                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
+                goto out;
+        }
+
+
+        local = frame->local;
+        priv = this->private;
+        cluster_markerxtime_cbk (frame, cookie, this, op_ret, op_errno, dict,
+                                &local->marker, priv->vol_uuid);
+out:
+return 0;
+}
+
+int32_t
+afr_markeruuid_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                     int op_ret, int op_errno, dict_t *dict)
+{
+        afr_local_t *local = NULL;
+        afr_private_t      *priv = NULL;
+
+
+        if (!this || !frame || !frame->local || !cookie) {
+                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
+                goto out;
+        }
+
+
+        local = frame->local;
+        priv = this->private;
+        cluster_markeruuid_cbk (frame, cookie, this, op_ret, op_errno, dict,
+                                &local->marker, priv->vol_uuid);
+out:
+return 0;
+}
+
+int32_t
 afr_getxattr (call_frame_t *frame, xlator_t *this,
 	      loc_t *loc, const char *name)
 {
@@ -683,12 +726,39 @@ afr_getxattr (call_frame_t *frame, xlator_t *this,
 	ALLOC_OR_GOTO (local, afr_local_t, out);
 	frame->local = local;
 
+        loc_copy (&local->loc, loc);
+        if (name)
+                local->cont.getxattr.name       = gf_strdup (name);
+
+
         if (name) {
                 if (!strncmp (name, AFR_XATTR_PREFIX,
                               strlen (AFR_XATTR_PREFIX))) {
 
                         op_errno = ENODATA;
                         goto out;
+                }
+                if (strcmp (GF_XATTR_MARKER_KEY, name) == 0) {
+                        local->marker.call_count = priv->child_count;
+                        if (cluster_getmarkerattr (frame, this, loc, name, &local->marker,
+                                        priv->vol_uuid, afr_markeruuid_cbk)) {
+                                 op_errno = EINVAL;
+                                 goto out;
+                        }
+
+                        return 0;
+                }
+
+                if (*priv->vol_uuid) {
+                        if (match_uuid_local (name, priv->vol_uuid) == 0) {
+                                local->marker.call_count = priv->child_count;
+                                if (cluster_getmarkerattr (frame, this, loc, name, &local->marker,
+                                                        priv->vol_uuid, afr_markerxtime_cbk)) {
+                                         op_errno = EINVAL;
+                                         goto out;
+                                }
+                                return 0;
+                        }
                 }
 
         }
@@ -712,9 +782,6 @@ afr_getxattr (call_frame_t *frame, xlator_t *this,
                 local->cont.getxattr.last_tried = call_child;
         }
 
-	loc_copy (&local->loc, loc);
-	if (name)
-	  local->cont.getxattr.name       = gf_strdup (name);
 
 	STACK_WIND_COOKIE (frame, afr_getxattr_cbk,
 			   (void *) (long) call_child,
