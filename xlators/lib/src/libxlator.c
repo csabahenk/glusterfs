@@ -10,7 +10,7 @@ parse_digit_pair (char **str, unsigned long *digs)
 
         digs[0] = strtoul (*str, str, 10);
 
-        if (*str[0] != '.' || !isdigit (*str[1]))
+        if ((*str) [0] != '.' || !isdigit ((*str) [1]))
                 return 2;
 
         digs[1] = strtoul (*str + 1, str, 10);
