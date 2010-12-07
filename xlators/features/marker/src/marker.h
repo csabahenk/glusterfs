@@ -23,6 +23,7 @@
 
 #include "xlator.h"
 #include "defaults.h"
+#include "uuid.h"
 
 #define MARKER_XATTR_PREFIX "trusted.glusterfs"
 #define XTIME               "xtime"
@@ -67,6 +68,7 @@ typedef struct marker_local marker_local_t;
 
 struct marker_conf{
         char        *volume_uuid;
+        uuid_t      volume_uuid_bin;
         char        *timestamp_file;
         char        *marker_xattr;
 };

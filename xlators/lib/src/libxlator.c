@@ -1,85 +1,7 @@
 #include "libxlator.h"
 
-int
-parse_digit_pair (char **str, unsigned long *digs)
-{
-        if (!isdigit (*str[0]))
-                return 2;
-
-        errno = 0;
-
-        digs[0] = strtoul (*str, str, 10);
-
-        if ((*str) [0] != '.' || !isdigit ((*str) [1]))
-                return 2;
-
-        digs[1] = strtoul (*str + 1, str, 10);
-
-        return errno ? 2 : 0;
-}
-
-int
-parse_vol_uuid (char **str)
-{
-        char *s = *str;
-        int i =0;
-
-        for (i = 0; i < UUID_SIZE; i++) {
-                if (!(isdigit (*s) || (*s >= 'a' && *s <= 'f') || *s == '-'))
-                        return 2;
-        }
-
-        *str += i;
-
-        return 0;
-}
-
-/* For getxattr on trusted.glusterfs.volume-mark parse the value as <ver no>:<vol-uuid>:<sec>.<usec>*/
-/*4-kind of return values
-        *  0 - Success
-        * -1 - Operational failure such as ENOMEM
-        *  1 - Not of the form <ver no>:<vol-uuid>:<sec>.<usec>  BUT of the form  <ver no>:<vol-uuid>
-        *  2 - Failure  Not of the form <ver no>:<vol-uuid> HENCE should set EINVAL as return value*/
-
-
-int
-parse_uuid_markstruct (char *name, struct marker_str *local)
-{
-        unsigned long digs[2] = {0,};
-        char            *temp_str = name;
-        int              ret = -1;
-
-        ret = parse_digit_pair (&temp_str, digs);
-        if (!ret && (digs[0] != 1 || digs[1] > 999 || temp_str[0] != ':'))
-                ret = 2;
-        if (ret)
-                return ret;
-
-        temp_str++;
-        ret = parse_vol_uuid (&temp_str);
-        if (!ret && temp_str[0] != ':')
-                ret = 2;
-        if (ret)
-                return ret;
-
-        temp_str++;
-        strncpy (local->head, name, temp_str - name);
-
-        ret = parse_digit_pair (&temp_str, digs);
-        if (!ret && (digs[0] > UINT_MAX || digs[1] > UINT_MAX || *temp_str))
-                ret = 2;
-
-        local->timebuf[0] = digs[0];
-        local->timebuf[1] = digs[1];
-
-        return ret;
-}
-
-
-
-
 /*Copy the contents of oldtimebuf to newtimbuf*/
-void
+static void
 update_timebuf (uint32_t *oldtimbuf, uint32_t *newtimebuf)
 {
         newtimebuf[0] =  (oldtimbuf[0]);
@@ -87,7 +9,7 @@ update_timebuf (uint32_t *oldtimbuf, uint32_t *newtimebuf)
 }
 
 /* Convert Timebuf in network order to host order */
-void
+static void
 get_hosttime (uint32_t *oldtimbuf, uint32_t *newtimebuf)
 {
         newtimebuf[0] = ntohl (oldtimbuf[0]);
@@ -215,89 +137,55 @@ cluster_markeruuid_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         struct marker_str *marker, char *vol_uuid)
 {
         int32_t         callcnt = 0;
-        char           *str = NULL;
-        char           *tmp_str = NULL;
-        char           *tail = NULL;
-        unsigned long   digs[2] = {0,};
-        int             ret = -1;
+        data_t         *data = NULL;
 
         if (!this || !frame || !cookie || !marker) {
                 gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto err;
+                goto out;
         }
+
+        if (op_ret || !(data = dict_get (dict, GF_XATTR_MARKER_KEY)))
+                goto out;
+
+        op_errno = 0;
 
         LOCK (&frame->lock);
         {
                 callcnt = --marker->call_count;
 
-                if (dict_get_str (dict, GF_XATTR_MARKER_KEY, &str) == 0) {
-                        if (marker_has_volinfo (marker)) {
-                                ret = 2;
-
-                                tail = strtail (str, marker->head);
-                                if (tail)
-                                        ret = parse_digit_pair (&tail, digs);
-                                if (!ret && (digs[0] > UINT_MAX ||
-                                             digs[1] > UINT_MAX || *tail))
-                                        ret = 2;
-
-                                if (!ret && (digs[0] > marker->timebuf[0] ||
-                                    (digs[0] == marker->timebuf[0] &&
-                                     digs[1] > marker->timebuf[1]))) {
-                                        marker->timebuf[0] = digs[0];
-                                        marker->timebuf[1] = digs[1];
-                                }
-                        } else {
-                                ret = parse_uuid_markstruct (str, marker);
-                                if (ret == 0 || ret == 1)
-                                        memcpy (vol_uuid,
-                                                marker_get_uuid (marker), UUID_SIZE);
-                        }
-
-                        if ( ret == -1) {
-                                op_ret = -1;
-                                op_errno = errno;
-                                goto err;
-                        }
-                        /* when marker xlator returns <uuid:FAILURE>*/
-                        if ( ret == 1) {
-                                goto err;
-                        }
-                        /*Not of the the form <version-no>:<uuid>,
-                         *should return EINVAL to the User*/
-                        if ( ret == 2) {
-                                op_ret = -1;
+                if (data->len != VMARK_SIZE || data->data[0] != 1)
+                        op_errno = EINVAL;
+                else if (marker_has_volinfo (marker)) {
+                        if (memcmp (marker->vmark, data->data, VMARK_HSIZE) != 0)
                                 op_errno = EINVAL;
-                                goto err;
-                        }
+                        else if (data->data[VMARK_HSIZE] != 0) {
+                                memcpy (marker->vmark, data->data, VMARK_SIZE);
+                                callcnt = 0;
+                        } else if (memcmp (marker->vmark, data->data, VMARK_SIZE) < 0)
+                                memcpy (marker->vmark, data->data, VMARK_SIZE);
+                } else {
+                        memcpy (marker->vmark, data->data, VMARK_SIZE);
+                        uuid_unparse ((unsigned char *)(marker->vmark + 2), vol_uuid);
+                        if (data->data[VMARK_HSIZE] != 0)
+                                callcnt = 0;
                 }
-
         }
+
         UNLOCK (&frame->lock);
+
+        if (op_errno) {
+                op_ret = -1;
+                dict = NULL;
+                callcnt = 0;
+        }
+
         if (!callcnt) {
-                if (marker_has_volinfo (marker)) {
-                        ret = gf_asprintf (&tmp_str, "%s%u.%u",
-                                           marker->head, marker->timebuf[0],
-                                           marker->timebuf[1]);
-                        if (ret == -1) {
-                                op_ret = -1;
-                                op_errno = ENOMEM;
-                        }
-                        if (dict_set_dynstr (dict, GF_XATTR_MARKER_KEY, tmp_str)) {
-                                op_errno = ENOMEM;
-                                op_ret = -1;
-                        }
-                }
+                if (marker_has_volinfo (marker) && op_ret == 0 && data)
+                        memcpy (data->data, marker->vmark, VMARK_SIZE);
+
+ out:
                 STACK_UNWIND_STRICT (getxattr, frame, op_ret, op_errno, dict);
-                return ;
         }
-        return;
-
-err:
-        UNLOCK (&frame->lock);
-        STACK_UNWIND_STRICT (getxattr, frame, op_ret, op_errno, NULL);
-        return ;
-
 }
 
 

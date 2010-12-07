@@ -23,6 +23,7 @@
 
 #include "xlator.h"
 #include "defaults.h"
+#include "libxlator.h"
 #include "marker.h"
 #include "marker-mem-types.h"
 
@@ -193,31 +194,30 @@ marker_free_local (marker_local_t *local)
 int32_t
 stat_stampfile (xlator_t *this, marker_conf_t *priv, char **status)
 {
-        int32_t     ret;
         struct stat buf;
+        char *statusb = NULL;
 
-        GF_ASSERT (!priv->timestamp_file);
-
-        if (stat (priv->timestamp_file, &buf) != -1) {
-                ret = gf_asprintf (status, "1.0:%s:%u.%u",
-                                  priv->volume_uuid, buf.st_ctime,
-                                  ST_CTIM_NSEC (&buf)/1000);
-                if (ret == -1)
-                        goto err;
-        } else {
-                ret = gf_asprintf (status, "1.0:%s:FAILURE", priv->volume_uuid);
-
-                if (ret == -1)
-                        goto err;
-
-                gf_log (this->name, GF_LOG_DEBUG, "volume mark value is %s", status);
+        statusb = GF_MALLOC (VMARK_SIZE, gf_marker_mt_volume_mark);
+        if (!statusb) {
+                *status = NULL;
+                return 1;
         }
 
-        return 0;
-err:
-        *status = NULL;
+        statusb[0] = 1;
+        statusb[1] = 0;
+        GF_ASSERT (sizeof (priv->volume_uuid_bin) == 16);
+        memcpy (statusb + 2, priv->volume_uuid_bin, 16);
 
-        return 1;
+        if (stat (priv->timestamp_file, &buf) != -1) {
+                statusb[18] = 0;
+                *(uint32_t *)(statusb + 19) = htonl (buf.st_ctime);
+                *(uint32_t *)(statusb + 23) = htonl (ST_CTIM_NSEC (&buf)/1000);
+        } else
+                statusb[18] = 1;
+
+        *status = statusb;
+
+        return 0;
 }
 
 int32_t
@@ -235,7 +235,7 @@ marker_getxattr_stampfile_cbk (call_frame_t *frame, xlator_t *this,
 
         dict = dict_new ();
 
-        ret = dict_set_str (dict, (char *)name, stampfile_status);
+        ret = dict_set_bin (dict, (char *)name, stampfile_status, VMARK_SIZE);
 
         STACK_UNWIND_STRICT (getxattr, frame, 0, 0, dict);
 
@@ -1227,6 +1227,12 @@ init (xlator_t *this)
 
         if( (data = dict_get (options, VOLUME_UUID)) != NULL) {
                 priv->volume_uuid = data->data;
+
+                ret = uuid_parse (priv->volume_uuid, priv->volume_uuid_bin);
+                if (ret == -1) {
+                        gf_log (this->name, GF_LOG_ERROR, "invalid volume uuid %s", priv->volume_uuid);
+                        goto err;
+                }
 
                 ret = gf_asprintf (& (priv->marker_xattr), "%s.%s.%s",
                                    MARKER_XATTR_PREFIX, priv->volume_uuid, XTIME);

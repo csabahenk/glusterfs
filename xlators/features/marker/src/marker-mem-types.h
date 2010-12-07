@@ -26,6 +26,7 @@ enum gf_marker_mem_types_ {
         gf_marker_mt_marker_local_t = gf_common_mt_end + 1,
         gf_marker_mt_marker_conf_t,
         gf_marker_mt_loc_t,
+        gf_marker_mt_volume_mark,
         gf_marker_mt_end
 };
 #endif
