@@ -32,11 +32,10 @@
 #define TIMESTAMP_FILE      "timestamp-file"
 
 /*initialize the local variable*/
-#define MARKER_INIT_LOCAL(_frame, _local, _inode) do {          \
+#define MARKER_INIT_LOCAL(_frame,_local) do {                   \
                 _frame->local = _local;                         \
-                _local->inode = inode_ref (_inode);             \
-                _local->pid = frame->root->pid;                 \
-                _local->loc = NULL;                             \
+                _local->pid = _frame->root->pid;                \
+                memset (&_local->loc, 0, sizeof (loc_t));       \
         } while (0)
 
 /* try alloc and if it fails, goto label */
@@ -50,19 +49,10 @@
                 }                                                \
         } while (0)
 
-#define MARKER_LOC_WIPE(_loc) do {                              \
-                if (local->loc != NULL) {                       \
-                        loc_wipe (local->loc);                  \
-                        GF_FREE (local->loc);                   \
-                        local->loc = NULL;                      \
-                }                                               \
-        } while (0)
-
 struct marker_local{
         uint32_t        timebuf[2];
-        inode_t        *inode;
         pid_t           pid;
-        loc_t          *loc;
+        loc_t           loc;
 };
 typedef struct marker_local marker_local_t;
 
@@ -72,5 +62,4 @@ struct marker_conf{
         char        *timestamp_file;
         char        *marker_xattr;
 };
-
 typedef struct marker_conf marker_conf_t;
