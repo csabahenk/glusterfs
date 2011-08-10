@@ -8,7 +8,11 @@ from threading import Lock, Thread as baseThread
 from errno import EACCES, EAGAIN, EPIPE, ENOTCONN
 from signal import SIGTERM, SIGKILL
 from time import sleep
-from cPickle import PickleError
+try:
+    from cPickle import PickleError
+except ImportError:
+    # py 3
+    from pickle import PickleError
 
 from gconf import gconf
 
@@ -210,5 +214,5 @@ class Thread(baseThread):
         baseThread.__init__(self, *a, **kw)
         self.setDaemon(True)
 
-class GsyncdError(StandardError):
+class GsyncdError(Exception):
     pass
