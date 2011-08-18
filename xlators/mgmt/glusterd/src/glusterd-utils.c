@@ -2840,9 +2840,14 @@ glusterd_nodesvc_start (char *server)
 #ifdef DEBUG
         char                    valgrind_logfile[PATH_MAX] = {0};
 #endif
+        char *nonfs;
 
         this = THIS;
         GF_ASSERT(this);
+
+	nonfs = getenv ("NONFS");
+	if (nonfs && strcmp (nonfs, "1") == 0)
+		return 0;
 
         priv = this->private;
 
