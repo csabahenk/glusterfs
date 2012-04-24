@@ -5723,7 +5723,7 @@ gf_cli3_1_mount_cbk (struct rpc_req *req, struct iovec *iov,
                 /* weird sounding but easy to parse... */
                 cli_err ("%d : failed with this errno (%s)",
                          rsp.op_errno, strerror (rsp.op_errno));
-                ret = 1;
+                ret = -1;
         }
 
 out:
@@ -5787,7 +5787,7 @@ gf_cli3_1_umount_cbk (struct rpc_req *req, struct iovec *iov,
                 ret = 0;
         else {
                 cli_err ("umount failed");
-                ret = 1;
+                ret = -1;
         }
 
 out:
