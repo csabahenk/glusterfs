@@ -9,11 +9,6 @@ except ImportError:
     # py 3
     import _thread as thread
 try:
-    from Queue import Queue
-except ImportError:
-    # py 3
-    from queue import Queue
-try:
     import cPickle as pickle
 except ImportError:
     # py 3
@@ -57,30 +52,18 @@ class RepceServer(object):
     This is the server component.
     """
 
-    def __init__(self, obj, i, o, wnum=6):
+    def __init__(self, obj, i, o):
         """register a backend object .obj to which incoming messages
            are dispatched, also incoming/outcoming streams
         """
         self.obj = obj
         self.inf, self.out = ioparse(i, o)
-        self.wnum = wnum
-        self.q = Queue()
 
     def service_loop(self):
-        """fire up worker threads, get messages and dispatch among them"""
-        for i in range(self.wnum):
-            t = Thread(target=self.worker)
-            t.start()
-        try:
-            while True:
-                self.q.put(recv(self.inf))
-        except EOFError:
-            logging.info("terminating on reaching EOF.")
+        """Service loop to process messages
 
-    def worker(self):
-        """life of a worker
-
-        Get message, extract its id, method name and arguments
+        Following activity is iterated:
+        get message, extract its id, method name and arguments
         (kwargs not supported), call method on .obj.
         Send back message id + return value.
         If method call throws an exception, rescue it, and send
@@ -88,7 +71,11 @@ class RepceServer(object):
         exception).
         """
         while True:
-            in_data = self.q.get(True)
+            try:
+                in_data = recv(self.inf)
+            except EOFError:
+                logging.info("terminating on reaching EOF.")
+                break
             rid = in_data[0]
             rmeth = in_data[1]
             exc = False
@@ -127,6 +114,25 @@ class RepceJob(object):
             self.lever.wait()
         self.lever.release()
         return self.result
+
+    def _default_cbk(self, resp, label):
+        exc, res = resp
+        if exc:
+            logging.error('call %s (%s) failed on peer with %s' % (repr(self), label, str(type(res).__name__)))
+            raise res
+        logging.debug("call %s %s -> %s" % (repr(self), label, repr(res)))
+        return res
+
+    @staticmethod
+    def default_cbk(label):
+        """cbk for RepceJobs that returns the result of the RepceJob it's registered with,
+        or if error occured, raise. Logging is done with @label"""
+        return lambda rj, resp: rj._default_cbk(resp, label)
+
+    def wait_fallibly(self, label):
+        """Wait for result and return it, or if error occurred, raise.
+           Logging is done with @label"""
+        return self._default_cbk(self.wait(), label)
 
     def wakeup(self, data):
         self.result = data
@@ -167,9 +173,7 @@ class RepceClient(object):
         """
         cbk = kw.get('cbk')
         if not cbk:
-            def cbk(rj, res):
-                if res[0]:
-                    raise res[1]
+            cbk = RepceJob.default_cbk(meth + '&')
         rjob = RepceJob(cbk)
         self.jtab[rjob.rid] = rjob
         logging.debug("call %s %s%s ..." % (repr(rjob), meth, repr(args)))
@@ -182,13 +186,7 @@ class RepceClient(object):
         We do a .push with a cbk which does a wakeup upon receiving anwser, then wait
         on the RepceJob.
         """
-        rjob = self.push(meth, *args, **{'cbk': lambda rj, res: rj.wakeup(res)})
-        exc, res = rjob.wait()
-        if exc:
-            logging.error('call %s (%s) failed on peer with %s' % (repr(rjob), meth, str(type(res).__name__)))
-            raise res
-        logging.debug("call %s %s -> %s" % (repr(rjob), meth, repr(res)))
-        return res
+        return self.push(meth, *args, **{'cbk': RepceJob.wakeup}).wait_fallibly(meth)
 
     class mprx(object):
         """method proxy, standard trick to implement rubyesque method_missing

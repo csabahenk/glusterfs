@@ -11,6 +11,7 @@ from threading import currentThread, Condition, Lock
 
 from gconf import gconf
 from syncdutils import FreeObject, Thread, GsyncdError, boolify
+from repce import RepceJob
 
 URXTIME = (-1, 0)
 
@@ -113,6 +114,13 @@ class GMaster(object):
         # the actual volinfo we make use of
         self.volinfo = None
         self.terminate = False
+        if int(gconf.max_slaves) < 2:
+            self.bgslave = self.slave
+        else:
+            # fire up another server for slave to
+            # which we send backgrounded requests
+            self.bgslave = self.slave.clone()
+            self.bgslave.connect_remote()
 
     def crawl_loop(self):
         """start the keep-alive thread and iterate .crawl"""
@@ -134,7 +142,8 @@ class GMaster(object):
                         # to slave if it becomes established in the
                         # meantime
                         gap = min(10, gap)
-                    self.slave.server.keep_alive(vi)
+                    for sl in set((self.slave, self.bgslave)):
+                        sl.server.push('keep_alive', vi)
                     time.sleep(gap)
             t = Thread(target=keep_alive)
             t.start()
@@ -152,6 +161,20 @@ class GMaster(object):
         """invoke .add_job with a job that does nothing just fails"""
         logging.debug('salvaged: ' + label)
         self.add_job(path, label, lambda: False)
+
+    def add_bgslavejob(self, path, meth, *a, **kw):
+        """send @meth to slave in background (optionally with
+        @kw['cbk'] as callback), then invoke .add_job with a job
+        that waits for the result of this request
+        """
+        cbk = kw.get('cbk')
+        label = '@' + meth
+        if not cbk:
+            cbk = RepceJob.default_cbk(label)
+        rjob = self.bgslave.server.push(meth, *a,
+                                        **{'cbk':
+                                           lambda *a: (cbk(*a), RepceJob.wakeup(*a))})
+        self.add_job(path, label, lambda: not rjob.wait()[0])
 
     def wait(self, path, *args):
         """perform jobs registered for @path
@@ -177,8 +200,13 @@ class GMaster(object):
         also can send a setattr payload (see Server.setattr).
         """
         if adct:
-            self.slave.server.setattr(path, adct)
-        self.slave.server.set_xtime(path, self.uuid, mark)
+            prnt = os.path.dirname(path)
+            assert(prnt)
+            self.add_bgslavejob(prnt, 'setattr', path, adct,
+                                cbk=lambda *a: (RepceJob.default_cbk('@setattr')(*a),
+                                                self.bgslave.server.push('set_xtime', path, self.uuid, mark)))
+        else:
+            self.bgslave.server.push('set_xtime', path, self.uuid, mark)
 
     @staticmethod
     def volinfo_state_machine(volinfo_state, volinfo_sys):
@@ -309,11 +337,14 @@ class GMaster(object):
         if isinstance(xtr0, int):
             if xtr0 != ENOENT:
                 self.slave.server.purge(path)
-            try:
-                self.slave.server.mkdir(path)
-            except OSError:
-                self.add_failjob(path, 'no-remote-node')
-                return
+            # Optimistic heuristic -- the "fastpath"
+            # we send the mkdir backgrounded and
+            # make our bet that by the time slave receives
+            # 'entries', it will be there. If this does not
+            # happen to be the case, then we go for
+            # "slowpath" strategy: purge and re-create path
+            # synchrononously (see below)
+            self.bgslave.server.push('mkdir', path)
             xtr = URXTIME
         else:
             xtr = xtr0
@@ -348,9 +379,11 @@ class GMaster(object):
             except OSError:
                 self.add_failjob(path, 'remote-entries-fail')
                 return
+        st = os.lstat(path)
+        self.add_bgslavejob(path, 'setattr', path, {'own': (st.st_uid, st.st_gid), 'mode': st.st_mode})
         dd = set(des) - set(dem)
         if dd and not boolify(gconf.ignore_deletes):
-            self.slave.server.purge(path, dd)
+            self.add_bgslavejob(path, 'purge', path, dd)
         chld = []
         for e in dem:
             e = os.path.join(path, e)
@@ -379,9 +412,12 @@ class GMaster(object):
             mo = st.st_mode
             adct = {'own': (st.st_uid, st.st_gid)}
             if stat.S_ISLNK(mo):
-                if indulgently(e, lambda e: self.slave.server.symlink(os.readlink(e), e)) == False:
+                if indulgently(e,
+                               lambda e: \
+                                 self.add_bgslavejob(path, 'symlink', os.readlink(e), e,
+                                                     cbk=lambda *a: (RepceJob.default_cbk('@symlink')(*a),
+                                                                     self.sendmark(e, xte, adct)))) == False:
                     continue
-                self.sendmark(e, xte, adct)
             elif stat.S_ISREG(mo):
                 logging.debug("syncing %s ..." % e)
                 pb = self.syncer.add(e)
@@ -394,8 +430,7 @@ class GMaster(object):
                         logging.warn("failed to sync " + e)
                 self.add_job(path, 'reg', regjob, e, xte, pb)
             elif stat.S_ISDIR(mo):
-                adct['mode'] = mo
-                if indulgently(e, lambda e: (self.add_job(path, 'cwait', self.wait, e, xte, adct),
+                if indulgently(e, lambda e: (self.add_job(path, 'cwait', self.wait, e, xte),
                                              self.crawl(e, xte),
                                              True)[-1], blame=e) == False:
                     continue

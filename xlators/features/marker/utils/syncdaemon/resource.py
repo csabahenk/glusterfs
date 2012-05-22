@@ -441,7 +441,7 @@ class SlaveLocal(object):
         stop servicing if a timeout is configured and got no
         keep-alime in that inteval
         """
-        repce = RepceServer(self.server, sys.stdin, sys.stdout, int(gconf.sync_jobs))
+        repce = RepceServer(self.server, sys.stdin, sys.stdout)
         t = syncdutils.Thread(target=lambda: (repce.service_loop(),
                                               syncdutils.finalize()))
         t.start()
@@ -506,6 +506,13 @@ class SlaveRemote(object):
         po.terminate_geterr(fail_on_err = False)
         return po
 
+    def clone(self):
+        """create a secondary resource that's attached to same backend
+
+        Should be called only when .connect_remote() is ready.
+        """
+        raise AttributeError("not implemented for resource %s" % type(self).__name__)
+
 
 class AbstractUrl(object):
     """abstract base class for url scheme classes"""
@@ -566,6 +573,9 @@ class FILE(AbstractUrl, SlaveLocal, SlaveRemote):
 
     def rsync(self, files):
         return sup(self, files, self.path)
+
+    def clone(self):
+        return type(self)(self.path)
 
 
 class GLUSTER(AbstractUrl, SlaveLocal, SlaveRemote):
@@ -834,6 +844,9 @@ class GLUSTER(AbstractUrl, SlaveLocal, SlaveRemote):
     def rsync(self, files):
         return sup(self, files, self.slavedir)
 
+    def clone(self):
+        return FILE(self.slavedir)
+
 
 class SSH(AbstractUrl, SlaveRemote):
     """scheme class for ssh:// urls
@@ -872,12 +885,12 @@ class SSH(AbstractUrl, SlaveRemote):
         sup(self, *a)
         ityp = type(self.inner_rsc)
         if ityp == FILE:
-            slavepath = self.inner_rsc.path
+            self.slavepath = self.inner_rsc.path
         elif ityp == GLUSTER:
-            slavepath = "/proc/%d/cwd" % self.server.pid()
+            self.slavepath = "/proc/%d/cwd" % self.server.pid()
         else:
             raise NotImplementedError
-        self.slaveurl = ':'.join([self.remote_addr, slavepath])
+        self.slaveurl = ':'.join([self.remote_addr, self.slavepath])
 
     def connect_remote(self, go_daemon=None):
         """connect to inner slave url through outer ssh url
@@ -899,7 +912,7 @@ class SSH(AbstractUrl, SlaveRemote):
         """
         if go_daemon == 'done':
             return self.start_fd_client(*self.fd_pair)
-        gconf.setup_ssh_ctl(tempfile.mkdtemp(prefix='gsyncd-aux-ssh-'))
+        gconf.setup_ssh_ctl()
         deferred = go_daemon == 'postconn'
         ret = sup(self, gconf.ssh_command.split() + gconf.ssh_ctl_args + [self.remote_addr], slave=self.inner_rsc.url, deferred=deferred)
         if deferred:
@@ -923,3 +936,8 @@ class SSH(AbstractUrl, SlaveRemote):
 
     def rsync(self, files):
         return sup(self, files, '-ze', " ".join(gconf.ssh_command.split() + gconf.ssh_ctl_args), self.slaveurl)
+
+    def clone(self):
+        clo = type(self)(self.path)
+        clo.inner_rsc = parse_url(self.slavepath)
+        return clo

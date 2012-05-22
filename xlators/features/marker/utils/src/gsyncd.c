@@ -157,18 +157,23 @@ invoke_gsyncd (int argc, char **argv)
 }
 
 
+struct rsync_data {
+        pid_t sshpid;
+        char *target;
+};
+
 static int
-find_gsyncd (pid_t pid, pid_t ppid, char *name, void *data)
+check_gsyncd_sibling (pid_t pid, pid_t ppid, char *name, void *data)
 {
-        char buf[NAME_MAX * 2] = {0,};
+        char buf[max(NAME_MAX * 2, PATH_MAX + 1)] = {0,};
         char path[PATH_MAX]    = {0,};
         char *p                = NULL;
         int zeros              = 0;
         int ret                = 0;
         int fd                 = -1;
-        pid_t *pida            = (pid_t *)data;
+        struct rsync_data *rd  = (struct rsync_data *)data;
 
-        if (ppid != pida[0])
+        if (ppid != rd->sshpid)
                 return 0;
 
         sprintf (path, PROC"/%d/cmdline", pid);
@@ -197,11 +202,14 @@ find_gsyncd (pid_t pid, pid_t ppid, char *name, void *data)
         }
 
         if (ret == 1) {
-                if (pida[1] != -1) {
-                        fprintf (stderr, GSYNCD_PY" sibling is not unique");
-                        return -1;
-                }
-                pida[1] = pid;
+                /* check if rsync target matches gsyncd target */
+                sprintf (path, PROC"/%d/cwd", pid);
+                ret = readlink (path, buf, sizeof (buf));
+                if (ret == -1 || ret == sizeof (buf))
+                        return 0;
+                if ((strcmp (rd->target, path) /* match against gluster target */ &&
+                     strcmp (rd->target, buf) /* match against file target */) == 0)
+                        return 1;
         }
 
         return 0;
@@ -211,19 +219,17 @@ static int
 invoke_rsync (int argc, char **argv)
 {
         int i                  = 0;
-        char path[PATH_MAX]    = {0,};
         pid_t pid              = -1;
         pid_t ppid             = -1;
-        pid_t pida[]           = {-1, -1};
         char *name             = NULL;
-        char buf[PATH_MAX + 1] = {0,};
+        struct rsync_data rd   = {0,};
         int ret                = 0;
 
         assert (argv[argc] == NULL);
 
-        if (argc < 2 || strcmp (argv[1], "--server") != 0)
+        if (argc < 2 || strcmp (argv[1], "--server") != 0 ||
+            strcmp (argv[argc - 1], "/") == 0 /* root dir cannot be a target */)
                 goto error;
-
         for (i = 2; i < argc && argv[i][0] == '-'; i++);
 
         if (!(i == argc - 2 && strcmp (argv[i], ".") == 0 && argv[i + 1][0] == '/')) {
@@ -245,20 +251,10 @@ invoke_rsync (int argc, char **argv)
                 GF_FREE (name);
         }
         /* look up "ssh-sibling" gsyncd */
-        pida[0] = pid;
-        ret = prociter (find_gsyncd, pida);
-        if (ret == -1 || pida[1] == -1) {
-                fprintf (stderr, "gsyncd sibling not found\n");
-                goto error;
-        }
-        /* check if rsync target matches gsyncd target */
-        sprintf (path, PROC"/%d/cwd", pida[1]);
-        ret = readlink (path, buf, sizeof (buf));
-        if (ret == -1 || ret == sizeof (buf))
-                goto error;
-        if (strcmp (argv[argc - 1], "/") == 0 /* root dir cannot be a target */ ||
-            (strcmp (argv[argc - 1], path) /* match against gluster target */ &&
-             strcmp (argv[argc - 1], buf) /* match against file target */) != 0) {
+        rd.sshpid = pid;
+        rd.target = argv[argc - 1];
+        ret = prociter (check_gsyncd_sibling, &rd);
+        if (ret != 1) {
                 fprintf (stderr, "rsync target does not match "GEOREP" session\n");
                 goto error;
         }

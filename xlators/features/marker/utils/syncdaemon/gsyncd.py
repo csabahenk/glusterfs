@@ -164,7 +164,8 @@ def main_i():
     op.add_option('--rsync-extra',         metavar='ARGS',  default='-S', help=SUPPRESS_HELP)
     op.add_option('--timeout',             metavar='SEC',   type=int, default=120)
     op.add_option('--connection-timeout',  metavar='SEC',   type=int, default=60, help=SUPPRESS_HELP)
-    op.add_option('--sync-jobs',           metavar='N',     type=int, default=3)
+    op.add_option('--sync-jobs',           metavar='N',     type=int, default=os.sysconf(os.sysconf_names['SC_NPROCESSORS_ONLN']))
+    op.add_option('--max-slaves',          metavar='N',     type=int, default=2)
     op.add_option('--turns',               metavar='N',     type=int, default=0, help=SUPPRESS_HELP)
     op.add_option('--allow-network',       metavar='IPS',   default='')
 
