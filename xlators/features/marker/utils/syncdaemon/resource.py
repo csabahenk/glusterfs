@@ -411,7 +411,33 @@ class Server(object):
     @staticmethod
     def version():
         """version used in handshake"""
-        return 1.0
+        return 1.01
+
+    @classmethod
+    def __codeswap__(cls, ctx, vers):
+        if vers['proto'] < 1.01:
+            vers['object'] = 1.0
+            return
+        logging.debug("swapping code for %s to %s", repr(ctx), repr(vers))
+        cls.__bases__ = (getattr(sys.modules[__name__],
+                                 'Server_%d' % int(vers['object']*100)),)
+
+class Server_100(Server):
+    pass
+
+class Server_101(Server):
+
+    @staticmethod
+    def xtime(path, *uuids):
+        xtd = {}
+        for uuid in uuids:
+            xtd[uuid] = Server.xtime(path, uuid)
+        return xtd
+
+    @staticmethod
+    def set_xtime(path, uudict):
+        for u, t in uudict.items():
+            Server.set_xtime(path, u, t)
 
 
 class SlaveLocal(object):
@@ -481,12 +507,19 @@ class SlaveRemote(object):
         rv = self.server.__version__()
         exrv = {'proto': repce.repce_version, 'object': Server.version()}
         da0 = (rv, exrv)
+        # mapping the version dicts to their integer parts
         da1 = ({}, {})
         for i in range(2):
             for k, v in da0[i].iteritems():
                 da1[i][k] = int(v)
         if da1[0] != da1[1]:
             raise GsyncdError("RePCe major version mismatch: local %s, remote %s" % (exrv, rv))
+        if rv['proto'] >= 1.01:
+            self.server.commonvers = {'proto' : min(rv['proto'], exrv['proto']),
+                                      'object': min(rv['object'], exrv['object'])}
+            self.server.__codeswap__(self.server.commonvers)
+        else:
+            self.server.commonvers = exrv
 
     def rsync(self, files, *args):
         """invoke rsync"""

@@ -22,7 +22,12 @@ except ImportError:
 from syncdutils import Thread, select
 
 pickle_proto = -1
-repce_version = 1.0
+
+# Proto changelog:
+#
+# 1.0  -- initial version
+# 1.01 -- implement __codeswap__ (version negotiation)
+repce_version = 1.01
 
 def ioparse(i, o):
     if isinstance(i, int):
@@ -95,12 +100,15 @@ class RepceServer(object):
             if rmeth == '__repce_version__':
                 res = repce_version
             else:
-              try:
-                  res = getattr(self.obj, rmeth)(*in_data[2:])
-              except:
-                  res = sys.exc_info()[1]
-                  exc = True
-                  logging.exception("call failed: ")
+                try:
+                    args = in_data[2:]
+                    if rmeth == '__codeswap__':
+                        args = [self] + list(args)
+                    res = getattr(self.obj, rmeth)(*args)
+                except:
+                    res = sys.exc_info()[1]
+                    exc = True
+                    logging.exception("call failed: ")
             send(self.out, rid, exc, res)
 
 

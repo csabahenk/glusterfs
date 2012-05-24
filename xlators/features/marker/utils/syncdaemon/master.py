@@ -51,6 +51,29 @@ class GMaster(object):
         """
         return self.volinfo_state[self.KFGN] and True or False
 
+    @staticmethod
+    def _srv_xtime_100(srv, path, uuid):
+        return srv.xtime(path, uuid)
+
+    @staticmethod
+    def _srv_set_xtime_100(srv, path, uuid, xt):
+        return srv.set_xtime(path, uuid, xt)
+
+    @staticmethod
+    def _srv_xtime_101(srv, path, uuid):
+        return srv.xtime(path, uuid)[uuid]
+
+    @staticmethod
+    def _srv_set_xtime_101(srv, path, uuid, xt):
+        return srv.set_xtime(path, {uuid: xt})
+
+    def __codeswap__(self):
+        vers = self.slave.server.commonvers
+        self.master.server.__codeswap__(self, vers)
+        for m in ("srv_xtime", "srv_set_xtime"):
+            setattr(self, m,
+                    getattr(type(self), "_%s_%d" % (m, int(vers['object']*100))))
+
     def xtime(self, path, *a, **opts):
         """get amended xtime
 
@@ -71,7 +94,7 @@ class GMaster(object):
                 opts['default_xtime'] = ENODATA
             else:
                 opts['default_xtime'] = URXTIME
-        xt = rsc.server.xtime(path, self.uuid)
+        xt = self.srv_xtime(rsc.server, path, self.uuid)
         if isinstance(xt, int) and xt != ENODATA:
             return xt
         invalid_xtime = (xt == ENODATA or xt < self.volmark)
@@ -81,7 +104,7 @@ class GMaster(object):
                 sec = int(t)
                 nsec = int((t - sec) * 1000000)
                 xt = (sec, nsec)
-                rsc.server.set_xtime(path, self.uuid, xt)
+                self.srv_set_xtime(rsc.server, path, self.uuid, xt)
             else:
                 xt = opts['default_xtime']
         return xt
@@ -89,6 +112,7 @@ class GMaster(object):
     def __init__(self, master, slave):
         self.master = master
         self.slave = slave
+        self.__codeswap__()
         self.jobtab = {}
         self.syncer = Syncer(slave)
         # crawls vs. turns:
@@ -178,7 +202,7 @@ class GMaster(object):
         """
         if adct:
             self.slave.server.setattr(path, adct)
-        self.slave.server.set_xtime(path, self.uuid, mark)
+        self.srv_set_xtime(self.slave.server, path, self.uuid, mark)
 
     @staticmethod
     def volinfo_state_machine(volinfo_state, volinfo_sys):
