@@ -20,6 +20,8 @@
 #include <string.h>
 #include <sys/param.h> /* for PATH_MAX */
 
+#include "glusterfs.h"
+#include "globals.h"
 
 #include "common-utils.h"
 #include "run.h"
@@ -290,6 +292,16 @@ main (int argc, char **argv)
         struct invocable *i = NULL;
         char *b             = NULL;
         char *sargv         = NULL;
+        glusterfs_ctx_t *ctx = NULL;
+
+        ctx = glusterfs_ctx_new ();
+        if (!ctx)
+                return ENOMEM;
+
+        if (glusterfs_globals_init (ctx))
+                return 1;
+
+        THIS->ctx = ctx;
 
         evas = getenv (_GLUSTERD_CALLED_);
         if (evas && strcmp (evas, "1") == 0)
