@@ -18,9 +18,9 @@ except ImportError:
 
 from gconf import gconf
 from syncdutils import FreeObject, Thread, GsyncdError, boolify, \
-                       escape, unescape, select
+                       escape, unescape, select, XVectorizer, cachedprop
 
-URXTIME = (-1, 0)
+URXTIME = XVectorizer.URXTIME
 
 # Utility functions to help us to get to closer proximity
 # of the DRY principle (no, don't look for elevated or
@@ -46,6 +46,15 @@ def _volinfo_hook_relax_foreign(self):
     if self.inter_master:
         raise GsyncdError("cannot be intermediate master in special mode")
     return (volinfo_sys, state_change)
+
+def _make_xtime_opts(self, is_master, opts):
+    if not 'create' in opts:
+        opts['create'] = is_master and not self.inter_master
+    if not 'default_xtime' in opts:
+        if is_master and self.inter_master:
+            opts['default_xtime'] = ENODATA
+        else:
+            opts['default_xtime'] = self.minus_infinity
 
 
 # The API!
@@ -73,50 +82,8 @@ def gmaster_builder():
 class NormalMixin(object):
     """normal geo-rep behavior"""
 
-    minus_infinity = URXTIME
-
-    # following staticmethods ideally would be
-    # methods of an xtime object (in particular,
-    # implementing the hooks needed for comparison
-    # operators), but at this point we don't yet
-    # have a dedicated xtime class
-
-    @staticmethod
-    def serialize_xtime(xt):
-        return "%d.%d" % tuple(xt)
-
-    @staticmethod
-    def deserialize_xtime(xt):
-        return tuple(int(x) for x in xt.split("."))
-
-    @staticmethod
-    def native_xtime(xt):
-        return xt
-
-    @staticmethod
-    def xtime_geq(xt0, xt1):
-        return xt0 >= xt1
-
-    def make_xtime_opts(self, is_master, opts):
-        if not 'create' in opts:
-            opts['create'] = is_master and not self.inter_master
-        if not 'default_xtime' in opts:
-            if is_master and self.inter_master:
-                opts['default_xtime'] = ENODATA
-            else:
-                opts['default_xtime'] = URXTIME
-
-    def xtime_low(self, server, path, **opts):
-        xt = server.xtime(path, self.uuid)
-        if isinstance(xt, int) and xt != ENODATA:
-            return xt
-        if xt == ENODATA or xt < self.volmark:
-            if opts['create']:
-                xt = _xtime_now()
-                server.set_xtime(path, self.uuid, xt)
-            else:
-                xt = opts['default_xtime']
-        return xt
+    def make_xtime_opts(self, *a, **kw):
+        return _make_xtime_opts(self, *a, **kw)
 
     def keepalive_payload_hook(self, timo, gap):
         # first grab a reference as self.volinfo
@@ -140,10 +107,6 @@ class NormalMixin(object):
                                                                       volinfo_sys)
         return (volinfo_sys, state_change)
 
-    def xtime_reversion_hook(self, path, xtl, xtr):
-        if xtr > xtl:
-            raise GsyncdError("timestamp corruption for " + path)
-
     def need_sync(self, e, xte, xtrd):
         return xte > xtrd
 
@@ -159,7 +122,7 @@ class WrapupMixin(NormalMixin):
         if not 'create' in opts:
             opts['create'] = False
         if not 'default_xtime' in opts:
-            opts['default_xtime'] = URXTIME
+            opts['default_xtime'] = self.minus_infinity
 
     @staticmethod
     def keepalive_payload_hook(timo, gap):
@@ -179,67 +142,8 @@ class BlindMixin(object):
     synced, it shall be synced.
     """
 
-    minus_infinity = (URXTIME, None)
-
-    @staticmethod
-    def serialize_xtime(xt):
-        a = []
-        for x in xt:
-            if not x:
-                x = ('None', '')
-            a.extend(x)
-        return '.'.join(str(n) for n in a)
-
-    @staticmethod
-    def deserialize_xtime(xt):
-        a = xt.split(".")
-        a = (tuple(a[0:2]), tuple(a[3:4]))
-        b = []
-        for p in a:
-            if p[0] == 'None':
-                p = None
-            else:
-                p = tuple(int(x) for x in p)
-            b.append(p)
-        return tuple(b)
-
-    @staticmethod
-    def native_xtime(xt):
-        return xt[0]
-
-    @staticmethod
-    def xtime_geq(xt0, xt1):
-        return (not xt1[0] or xt0[0] >= xt1[0]) and \
-               (not xt1[1] or xt0[1] >= xt1[1])
-
-    @property
-    def ruuid(self):
-        if self.volinfo_r:
-            return self.volinfo_r['uuid']
-
-    @staticmethod
-    def make_xtime_opts(is_master, opts):
-        if not 'create' in opts:
-            opts['create'] = is_master
-        if not 'default_xtime' in opts:
-            opts['default_xtime'] = URXTIME
-
-    def xtime_low(self, server, path, **opts):
-        xtd = server.xtime_vec(path, self.uuid, self.ruuid)
-        if isinstance(xtd, int):
-            return xtd
-        xt = (xtd[self.uuid], xtd[self.ruuid])
-        if not xt[1] and (not xt[0] or xt[0] < self.volmark):
-            if opts['create']:
-                # not expected, but can happen if file originates
-                # from interrupted gsyncd transfer
-                logging.warn('have to fix up missing xtime on ' + path)
-                xt0 = _xtime_now()
-                server.set_xtime(path, self.uuid, xt0)
-            else:
-                xt0 = opts['default_xtime']
-            xt = (xt0, xt[1])
-        return xt
+    def make_xtime_opts(self, *a, **kw):
+        return _make_xtime_opts(self, *a, **kw)
 
     @staticmethod
     def keepalive_payload_hook(timo, gap):
@@ -250,16 +154,12 @@ class BlindMixin(object):
         volinfo_r_new = self.slave.server.native_volume_info()
         if volinfo_r_new['retval']:
             raise GsyncdError("slave is corrupt")
-        if getattr(self, 'volinfo_r', None):
-            if self.volinfo_r['uuid'] != volinfo_r_new['uuid']:
+        volinfo_r = self.volinfos.get(1)
+        if volinfo_r:
+            if volinfo_r['uuid'] != volinfo_r_new['uuid']:
                 raise GsyncdError("uuid mismatch on slave")
-        self.volinfo_r = volinfo_r_new
+        self.volinfos[1] = volinfo_r_new
         return res
-
-    def xtime_reversion_hook(self, path, xtl, xtr):
-        if not isinstance(xtr[0], int) and \
-          (isinstance(xtl[0], int) or xtr[0] > xtl[0]):
-            raise GsyncdError("timestamp corruption for " + path)
 
     def need_sync(self, e, xte, xtrd):
         if xte[0]:
@@ -288,13 +188,6 @@ class BlindMixin(object):
         # sync on non-identical xitmes)
         xtr = self.xtime(e, self.slave)
         return isinstance(xtr, int) or xte[1] != xtr[1]
-
-    def set_slave_xtime(self, path, mark):
-        xtd = {}
-        for (u, t) in zip((self.uuid, self.ruuid), mark):
-            if t:
-                xtd[u] = t
-        self.slave.server.set_xtime_vec(path, xtd)
 
 
 # Further mixins for certain tunable behaviors
@@ -342,10 +235,23 @@ class GMasterBase(object):
             fgn_vi = fgn_vis[0]
         return fgn_vi, nat_vi
 
+    def _make_uuids(self):
+        ukeys = self.volinfos.keys()
+        if ukeys != list(range(len(ukeys))):
+           raise RuntimeError("master's volinfo sequence (%s) has holes" % \
+                              repr(ukeys))
+        return [ self.volinfos[i]['uuid'] for i in ukeys ]
+
+    uuids = cachedprop('uuids', _make_uuids)
+
     @property
     def uuid(self):
-        if self.volinfo:
-            return self.volinfo['uuid']
+        if self.uuids:
+            return self.uuids[0]
+
+    @property
+    def volinfo(self):
+        return self.volinfos.get(0)
 
     @property
     def volmark(self):
@@ -358,6 +264,62 @@ class GMasterBase(object):
         in a cascading setup
         """
         return self.volinfo_state[self.KFGN] and True or False
+
+    # xtime related utility methods
+
+    orphanvec = cachedprop('orphanvec',
+                           lambda self: [self.volmark] + [URXTIME] * (len(self.uuids) - 1))
+
+    minus_infinity = cachedprop('minus_infinity',
+                                lambda self: [URXTIME] * len(self.uuids))
+
+    @staticmethod
+    def serialize_xtime(xt):
+        a = []
+        for x in xt:
+            a.extend(x)
+        return '.'.join(str(n) for n in a)
+
+    @staticmethod
+    def deserialize_xtime(xt):
+        a = xt.split(".")
+        b = []
+        i = 0
+        while i < len(a):
+            p = (int(a[i]), int(a[i+1]))
+            b.append(p)
+            i += 2
+        return b
+
+    @staticmethod
+    def native_xtime(xt):
+        return xt[0]
+
+    @staticmethod
+    def xtime_geq(xt0, xt1):
+        res = True
+        for i in range(len(xt0)):
+            if xt0[i] < xt1[i]:
+                res = False
+                break
+        return res
+
+    def xtime_low(self, server, path, **opts):
+        xt = server.xtime(path, self.uuids)
+        if isinstance(xt, int):
+            return xt
+        if self.xtime_geq(self.orphanvec, xt):
+            if opts['create']:
+                xt0 = _xtime_now()
+                server.set_xtime(path, self.uuids[0:1], (xt0,))
+                xt[0] = xt0
+            else:
+                xt = opts['default_xtime']
+        return xt
+
+    def xtime_reversion_hook(self, path, xtl, xtr):
+        if xtr[0] > xtl[0]:
+            raise GsyncdError("timestamp corruption for " + path)
 
     def xtime(self, path, *a, **opts):
         """get amended xtime
@@ -377,6 +339,29 @@ class GMasterBase(object):
 
     def __init__(self, master, slave):
         self.master = master
+        # compatibility frontends for a slave with an earlier version
+        # of the interface
+        slavevers = slave.server.commonvers['object']
+        if slavevers == 1.0:
+            def mconv(m):
+                return getattr(XVectorizer, '_vectorize_' + m)(lambda *a: slave.server(m, *a))
+            for m in ('xtime', 'set_xtime'):
+                setattr(slave.server, m, mconv(m))
+        elif slavevers == 1.01:
+            def _xtime_vec(path, uuids):
+                xtd = slave.server.xtime_vec(path, *uuids)
+                return [ xtd[u] for u in uuids ]
+            def _set_xtime_vec(path, uuids, xtimes):
+                xtd = {}
+                for i in range(uuids):
+                    xtd[uuids[i]] = xtimes[i]
+                return slave.server.set_xtime_vec(path, xtd)
+            slave.server.xtime = _xtime_vec
+            slave.server.set_xtime = _set_xtime_vec
+        elif slavevers == 1.02:
+            pass
+        else:
+            raise RuntimeError("unknown slave version %f" % slavevers)
         self.slave = slave
         self.jobtab = {}
         self.syncer = Syncer(slave)
@@ -400,7 +385,7 @@ class GMasterBase(object):
         uuid_preset = getattr(gconf, 'volume_id', None)
         self.volinfo_state = (uuid_preset and {'uuid': uuid_preset}, None)
         # the actual volinfo we make use of
-        self.volinfo = None
+        self.volinfos = {}
         self.terminate = False
         self.checkpoint_thread = None
 
@@ -573,7 +558,7 @@ class GMasterBase(object):
         """
         if adct:
             self.slave.server.setattr(path, adct)
-        self.set_slave_xtime(path, mark)
+        self.slave.server.set_xtime(path, self.uuids, mark)
 
     @staticmethod
     def volinfo_state_machine(volinfo_state, volinfo_sys):
@@ -670,9 +655,9 @@ class GMasterBase(object):
                                        time = self.start)
             volinfo_sys, state_change = self.volinfo_hook()
             if self.inter_master:
-                self.volinfo = volinfo_sys[self.KFGN]
+                self.volinfos[0] = volinfo_sys[self.KFGN]
             else:
-                self.volinfo = volinfo_sys[self.KNAT]
+                self.volinfos[0] = volinfo_sys[self.KNAT]
             if state_change == self.KFGN or (state_change == self.KNAT and not self.inter_master):
                 logging.info('new master is %s', self.uuid)
                 if self.volinfo:

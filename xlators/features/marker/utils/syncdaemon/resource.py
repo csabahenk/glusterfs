@@ -19,7 +19,7 @@ import repce
 from repce import RepceServer, RepceClient
 from  master import gmaster_builder
 import syncdutils
-from syncdutils import GsyncdError, select, privileged, boolify
+from syncdutils import GsyncdError, select, privileged, boolify, XVectorizer
 
 UrlRX  = re.compile('\A(\w+)://([^ *?[]*)\Z')
 HostRX = re.compile('[a-z\d](?:[a-z\d.-]*[a-z\d])?', re.I)
@@ -237,9 +237,31 @@ class Popen(subprocess.Popen):
             self.errfail()
 
 
-class Server(object):
-    """singleton implemening those filesystem access primitives
-       which are needed for geo-replication functionality
+def _pathguard(f):
+    """decorator method that checks
+    the path argument of the decorated
+    functions to make sure it does not
+    point out of the managed tree
+    """
+
+    fc = getattr(f, 'func_code', None)
+    if not fc:
+        # python 3
+        fc = f.__code__
+    pi = list(fc.co_varnames).index('path')
+    def ff(*a):
+        path = a[pi]
+        ps = path.split('/')
+        if path[0] == '/' or '..' in ps:
+            raise ValueError('unsafe path')
+        return f(*a)
+    return ff
+
+class ServerBase(object):
+    """Abstract base class + core functionality for Server* variants
+
+    Server* are singletons implemening those filesystem access primitives
+    which are needed for geo-replication functionality.
 
     (Singleton in the sense it's a class which has only static
     and classmethods and is used directly, without instantiation.)
@@ -249,26 +271,6 @@ class Server(object):
     NTV_FMTSTR = "!" + "B"*19 + "II"
     FRGN_XTRA_FMT = "I"
     FRGN_FMTSTR = NTV_FMTSTR + FRGN_XTRA_FMT
-
-    def _pathguard(f):
-        """decorator method that checks
-        the path argument of the decorated
-        functions to make sure it does not
-        point out of the managed tree
-        """
-
-        fc = getattr(f, 'func_code', None)
-        if not fc:
-            # python 3
-            fc = f.__code__
-        pi = list(fc.co_varnames).index('path')
-        def ff(*a):
-            path = a[pi]
-            ps = path.split('/')
-            if path[0] == '/' or '..' in ps:
-                raise ValueError('unsafe path')
-            return f(*a)
-        return ff
 
     @staticmethod
     @_pathguard
@@ -351,57 +353,6 @@ class Server(object):
     def symlink(cls, lnk, path):
         cls._create(path, lambda p: os.symlink(lnk, p))
 
-    @classmethod
-    @_pathguard
-    def xtime(cls, path, uuid):
-        """query xtime extended attribute
-
-        Return xtime of @path for @uuid as a pair of integers.
-        "Normal" errors due to non-existent @path or extended attribute
-        are tolerated and errno is returned in such a case.
-        """
-
-        try:
-            return struct.unpack('!II', Xattr.lgetxattr(path, '.'.join([cls.GX_NSPACE, uuid, 'xtime']), 8))
-        except OSError:
-            ex = sys.exc_info()[1]
-            if ex.errno in (ENOENT, ENODATA, ENOTDIR):
-                return ex.errno
-            else:
-                raise
-
-    @classmethod
-    def xtime_vec(cls, path, *uuids):
-        """vectored version of @xtime
-
-        accepts a list of uuids and returns a dictionary
-        with uuid as key(s) and xtime as value(s)
-        """
-        xt = {}
-        for uuid in uuids:
-            xtu = cls.xtime(path, uuid)
-            if xtu == ENODATA:
-                xtu = None
-            if isinstance(xtu, int):
-                return xtu
-            xt[uuid] = xtu
-        return xt
-
-    @classmethod
-    @_pathguard
-    def set_xtime(cls, path, uuid, mark):
-        """set @mark as xtime for @uuid on @path"""
-        Xattr.lsetxattr(path, '.'.join([cls.GX_NSPACE, uuid, 'xtime']), struct.pack('!II', *mark))
-
-    @classmethod
-    def set_xtime_vec(cls, path, mark_dct):
-        """vectored (or dictered) version of set_xtime
-
-        ignore values that match @ignore
-        """
-        for u,t in mark_dct.items():
-            cls.set_xtime(path, u, t)
-
     @staticmethod
     @_pathguard
     def setattr(path, adct):
@@ -449,7 +400,67 @@ class Server(object):
     @staticmethod
     def version():
         """version used in handshake"""
-        return 1.0
+        return 1.02
+
+    @staticmethod
+    def _mixin(vers):
+        return getattr(sys.modules[__name__],
+                      'ServerMixin%d' % int(vers*100))
+
+    @classmethod
+    def __codeswap__(cls, repce, vers):
+        logging.debug("swapping code for %s to %s", repr(repce), repr(vers))
+        class _Server(cls.__bases__[0], cls._mixin(vers['object'])):
+            pass
+        repce.obj = _Server
+
+class ServerMixin100(object):
+    """mixin implementing unary xtimes"""
+
+    @staticmethod
+    @_pathguard
+    def xtime(path, uuid):
+        """query xtime extended attribute
+
+        Return xtime of @path for @uuid as a pair of integers.
+        "Normal" errors due to non-existent @path or extended attribute
+        are tolerated and errno is returned in such a case.
+        """
+
+        try:
+            return struct.unpack('!II', Xattr.lgetxattr(path, '.'.join([ServerBase.GX_NSPACE, uuid, 'xtime']), 8))
+        except OSError:
+            ex = sys.exc_info()[1]
+            if ex.errno in (ENOENT, ENODATA, ENOTDIR):
+                return ex.errno
+            else:
+                raise
+
+    @staticmethod
+    @_pathguard
+    def set_xtime(path, uuid, mark):
+        """set @mark as xtime for @uuid on @path"""
+        Xattr.lsetxattr(path, '.'.join([ServerBase.GX_NSPACE, uuid, 'xtime']), struct.pack('!II', *mark))
+
+class ServerMixin101(ServerMixin100):
+    """transitional mixin implementing both unary and vectored xtimes"""
+
+    @staticmethod
+    def xtime_vec(path, *uuids):
+        xtd = {}
+        for u,x in ServerMixin102.xtime(path, uuids).items():
+            xtd[u] = x
+        return xtd
+
+    @staticmethod
+    def set_xtime_vec(path, xtd):
+        return ServerMixin102.set_xtime(path, *zip(*xtd.items()))
+
+class ServerMixin102(object):
+    """mixin implementing vectored xtimes"""
+
+    xtime     = staticmethod(XVectorizer.vectorize_xtime(ServerMixin100.xtime))
+    set_xtime = staticmethod(XVectorizer.vectorize_set_xtime(ServerMixin100.set_xtime))
 
 
 class SlaveLocal(object):
@@ -476,6 +487,7 @@ class SlaveLocal(object):
         if boolify(gconf.use_rsync_xattrs) and not privileged():
             raise GsyncdError("using rsync for extended attributes is not supported")
 
+        self.makeserver(1.01)
         repce = RepceServer(self.server, sys.stdin, sys.stdout, int(gconf.sync_jobs))
         t = syncdutils.Thread(target=lambda: (repce.service_loop(),
                                               syncdutils.finalize()))
@@ -483,9 +495,9 @@ class SlaveLocal(object):
         logging.info("slave listening")
         if gconf.timeout and int(gconf.timeout) > 0:
             while True:
-                lp = self.server.last_keep_alive
+                lp = repce.obj.last_keep_alive
                 time.sleep(int(gconf.timeout))
-                if lp == self.server.last_keep_alive:
+                if lp == repce.obj.last_keep_alive:
                     logging.info("connection inactive for %d seconds, stopping" % int(gconf.timeout))
                     break
         else:
@@ -522,14 +534,29 @@ class SlaveRemote(object):
         """
         self.server = RepceClient(i, o)
         rv = self.server.__version__()
-        exrv = {'proto': repce.repce_version, 'object': Server.version()}
+        exrv = {'proto': repce.repce_version, 'object': ServerBase.version()}
         da0 = (rv, exrv)
+        # mapping the version dicts to their integer parts
         da1 = ({}, {})
         for i in range(2):
             for k, v in da0[i].iteritems():
                 da1[i][k] = int(v)
         if da1[0] != da1[1]:
             raise GsyncdError("RePCe major version mismatch: local %s, remote %s" % (exrv, rv))
+        if rv['object'] == 1.00:
+            # check manually for server implementing 1.01 as that's implict
+            # (extension was added without proper versioning)
+            try:
+                self.server.xtime_vec('.')
+                rv['object'] == 1.01
+            except AttributeError:
+                pass
+        if rv['proto'] >= 1.01:
+            self.server.commonvers = {'proto' : min(rv['proto'], exrv['proto']),
+                                      'object': min(rv['object'], exrv['object'])}
+            self.server.__codeswap__(self.server.commonvers)
+        else:
+            self.server.commonvers = exrv
 
     def rsync(self, files, *args):
         """invoke rsync"""
@@ -582,6 +609,12 @@ class AbstractUrl(object):
     def url(self):
         return self.get_url()
 
+    def makeserver(self, vers):
+        class _Server(self.serverbase, ServerBase._mixin(vers)):
+            pass
+        self.server = _Server
+
+
 
   ### Concrete resource classes ###
 
@@ -594,11 +627,11 @@ class FILE(AbstractUrl, SlaveLocal, SlaveRemote):
     file server on master side
     """
 
-    class FILEServer(Server):
+    class FILEServerBase(ServerBase):
         """included server flavor"""
         pass
 
-    server = FILEServer
+    serverbase = FILEServerBase
 
     def __init__(self, path):
         sup(self, path, '^/')
@@ -621,7 +654,7 @@ class GLUSTER(AbstractUrl, SlaveLocal, SlaveRemote):
     functionality is outsourced to GMaster from master)
     """
 
-    class GLUSTERServer(Server):
+    class GLUSTERServerBase(ServerBase):
         "server enhancements for a glusterfs backend"""
 
         @classmethod
@@ -673,7 +706,7 @@ class GLUSTER(AbstractUrl, SlaveLocal, SlaveRemote):
                 if ex.errno != ENODATA:
                     raise
 
-    server = GLUSTERServer
+    serverbase = GLUSTERServerBase
 
     def __init__(self, path):
         self.host, self.volume = sup(self, path, '^(%s):(.+)' % HostRX.pattern)
@@ -871,6 +904,7 @@ class GLUSTER(AbstractUrl, SlaveLocal, SlaveRemote):
         - else do that's what's inherited
         """
         if args:
+            self.makeserver(1.02)
             gmaster_builder()(self, args[0]).crawl_loop()
         else:
             sup(self, *args)

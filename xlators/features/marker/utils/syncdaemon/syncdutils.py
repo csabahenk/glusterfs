@@ -6,7 +6,7 @@ import fcntl
 import shutil
 import logging
 from threading import Lock, Thread as baseThread
-from errno import EACCES, EAGAIN, EPIPE, ENOTCONN, ECONNABORTED, EINTR, errorcode
+from errno import EACCES, EAGAIN, EPIPE, ENOTCONN, ECONNABORTED, EINTR, ENODATA, errorcode
 from signal import signal, SIGTERM, SIGKILL
 from time import sleep
 import select as oselect
@@ -280,3 +280,52 @@ def waitpid (*a):
 
 def set_term_handler(hook=lambda *a: finalize(*a, **{'exval': 1})):
     signal(SIGTERM, hook)
+
+
+class XVectorizer:
+
+    URXTIME = (-1, 0)
+
+    class XtimeError(Exception):
+        pass
+
+    @classmethod
+    def vectorize_xtime(cls, fnc):
+        def _xtime_vec(path, uuids):
+            """vectored version of @xtime
+
+            Accepts an iterable of uuids and returns an
+            returns an iterable collection of respective
+            xtime values.
+            """
+            def uumap(uuid):
+                xtu = fnc(path, uuid)
+                if xtu == ENODATA:
+                    xtu = cls.URXTIME
+                if isinstance(xtu, int):
+                    raise cls.XtimeError(xtu)
+                return xtu
+            try:
+                # XXX py3
+                return map(uumap, uuids)
+            except cls.XtimeError:
+                return sys.exc_info()[1].message
+        return _xtime_vec
+
+    @staticmethod
+    def vectorize_set_xtime(fnc):
+        def _set_xtime_vec(path, uuids, xtimes):
+            """vectored version of set_xtime """
+            for i in range(len(uuids)):
+                fnc(path, uuids[i], xtimes[i])
+        return _set_xtime_vec
+
+
+def cachedprop(pnam, valf):
+    def pfun(self):
+        res = getattr(self, '_' + pnam, None)
+        if not res:
+            setattr(self, '_' + pnam, valf(self))
+            res = getattr(self, '_' + pnam, None)
+        return res
+    return property(pfun)
