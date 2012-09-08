@@ -443,16 +443,20 @@ class GMasterBase(object):
         status report"""
         if not chkpt:
             # dummy loop for the case when there is no checkpt set
+            logging.debug("checkpoint dummy loop...")
             while True:
                 select([chan], [], [])
+                logging.debug("received connection")
                 conn, _ = chan.accept()
                 conn.send('\0')
                 conn.close()
+        logging.debug("checkpoint loop...")
         completed = self._checkpt_param(chkpt, 'completed', xtimish=False)
         if completed:
             completed = tuple(int(x) for x in completed.split('.'))
         while True:
             s,_,_ = select([chan], [], [], (not completed) and 5 or None)
+            logging.debug("checkpoint: completed %s received %s" % (repr(completed), repr(s)))
             # either request made and we re-check to not
             # give back stale data, or we still hunting for completion
             if self.native_xtime(tgt) and self.native_xtime(tgt) < self.volmark:
@@ -481,6 +485,7 @@ class GMasterBase(object):
                 conn = None
                 try:
                     conn, _ = chan.accept()
+                    logging.debug("checkpoint: got connection")
                     try:
                         conn.send("  | checkpoint %s %s\0" % (chkpt, status))
                     except:
@@ -492,6 +497,7 @@ class GMasterBase(object):
                             raise
                 finally:
                     if conn:
+                        logging.debug("checkpoint: closing connection")
                         conn.close()
 
     def start_checkpoint_thread(self):
