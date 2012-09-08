@@ -12,6 +12,7 @@ import fnmatch
 from optparse import OptionParser, SUPPRESS_HELP
 from logging import Logger
 from errno import EEXIST, ENOENT
+import thread
 
 from ipaddr import IPAddress, IPNetwork
 
@@ -22,11 +23,16 @@ from configinterface import GConffile
 import resource
 from monitor import monitor
 
+from ctypes import *
+from ctypes.util import find_library
+
 class GLogger(Logger):
     """Logger customizations for gsyncd.
 
     It implements a log format similar to that of glusterfs.
     """
+
+    libc = CDLL(find_library("libc"))
 
     def makeRecord(self, name, level, *a):
         rv = Logger.makeRecord(self, name, level, *a)
@@ -39,6 +45,7 @@ class GLogger(Logger):
             ctx = '<top>'
         if not hasattr(rv, 'funcName'):
             rv.funcName = fr.f_code.co_name
+        rv.tid = self.libc.syscall(186) #thread.get_ident()
         rv.lvlnam = logging.getLevelName(level)[0]
         rv.ctx = ctx
         return rv
@@ -49,7 +56,7 @@ class GLogger(Logger):
         if lbl:
             lbl = '(' + lbl + ')'
         lprm = {'datefmt': "%Y-%m-%d %H:%M:%S",
-                'format': "[%(asctime)s.%(nsecs)d] %(lvlnam)s [%(module)s" + lbl + ":%(lineno)s:%(funcName)s] %(ctx)s: %(message)s"}
+                'format': "[%(asctime)s.%(nsecs)d] %(lvlnam)s [%(tid)s|%(module)s" + lbl + ":%(lineno)s:%(funcName)s] %(ctx)s: %(message)s"}
         lprm.update(kw)
         lvl = kw.get('level', logging.INFO)
         lprm['level'] = lvl
