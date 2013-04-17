@@ -160,6 +160,7 @@ def main_i():
     op.add_option('--log-file-mbr',        metavar='LOGF',  type=str, action='callback', callback=store_abs)
     op.add_option('--state-file',          metavar='STATF', type=str, action='callback', callback=store_abs)
     op.add_option('--ignore-deletes',      default=False, action='store_true')
+    op.add_option('--isolated-slave',      default=False, action='store_true')
     op.add_option('--use-rsync-xattrs',    default=False, action='store_true')
     op.add_option('-L', '--log-level',     metavar='LVL')
     op.add_option('-r', '--remote-gsyncd', metavar='CMD',   default=os.path.abspath(sys.argv[0]))
@@ -397,12 +398,12 @@ def main_i():
     else:
         label = 'slave'
     startup(go_daemon=go_daemon, log_file=log_file, label=label)
+    resource.Popen.init_errhandler()
 
     if be_monitor:
-        return monitor()
+        return monitor(*rscs)
 
     logging.info("syncing: %s" % " -> ".join(peers))
-    resource.Popen.init_errhandler()
     if remote:
         go_daemon = remote.connect_remote(go_daemon=go_daemon)
         if go_daemon:

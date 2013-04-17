@@ -5,8 +5,9 @@ import time
 import fcntl
 import shutil
 import logging
+import socket
 from threading import Lock, Thread as baseThread
-from errno import EACCES, EAGAIN, EPIPE, ENOTCONN, ECONNABORTED, EINTR, ENOENT, errorcode
+from errno import EACCES, EAGAIN, EPIPE, ENOTCONN, ECONNABORTED, EINTR, ENOENT, EPERM, errorcode
 from signal import signal, SIGTERM, SIGKILL
 from time import sleep
 import select as oselect
@@ -286,3 +287,45 @@ def waitpid (*a):
 
 def set_term_handler(hook=lambda *a: finalize(*a, **{'exval': 1})):
     signal(SIGTERM, hook)
+
+def is_host_local(host):
+    locaddr = False
+    for ai in socket.getaddrinfo(host, None):
+        # cf. http://github.com/gluster/glusterfs/blob/ce111f47/xlators/mgmt/glusterd/src/glusterd-utils.c#L125
+        if ai[0] == socket.AF_INET:
+            if ai[-1][0].split(".")[0] == "127":
+                locaddr = True
+                break
+        elif ai[0] == socket.AF_INET6:
+            if ai[-1][0] == "::1":
+                locaddr = True
+                break
+        else:
+            continue
+        try:
+            # use ICMP socket to avoid net.ipv4.ip_nonlocal_bind issue,
+            # cf. https://bugzilla.redhat.com/show_bug.cgi?id=890587
+            s = socket.socket(ai[0], socket.SOCK_RAW, socket.IPPROTO_ICMP)
+        except socket.error:
+            ex = sys.exc_info()[1]
+            if ex.errno != EPERM:
+                raise
+            f = None
+            try:
+                f = open("/proc/sys/net/ipv4/ip_nonlocal_bind")
+                if int(f.read()) != 0:
+                    raise GsyncdError(
+                            "non-local bind is set and not allowed to create raw sockets, "
+                            "cannot determine if %s is local" % host)
+                s = socket.socket(ai[0], socket.SOCK_DGRAM)
+            finally:
+                if f:
+                    f.close()
+        try:
+            s.bind(ai[-1])
+            locaddr = True
+            break
+        except:
+            pass
+        s.close()
+    return locaddr

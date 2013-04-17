@@ -893,13 +893,18 @@ class SSH(AbstractUrl, SlaveRemote):
                                           '^((?:%s@)?%s):(.+)' % tuple([ r.pattern for r in (UserRX, HostRX) ]))
         self.inner_rsc = parse_url(inner_url)
 
-    def canonical_path(self):
-        m = re.match('([^@]+)@(.+)', self.remote_addr)
+    @staticmethod
+    def parse_ssh_address(addr):
+        m = re.match('([^@]+)@(.+)', addr)
         if m:
             u, h = m.groups()
         else:
-            u, h = syncdutils.getusername(), self.remote_addr
-        remote_addr = '@'.join([u, gethostbyname(h)])
+            u, h = syncdutils.getusername(), addr
+        return {'user': u, 'host': h}
+
+    def canonical_path(self):
+        rap = self.parse_ssh_address(self.remote_addr)
+        remote_addr = '@'.join([rap['user'], gethostbyname(rap['host'])])
         return ':'.join([remote_addr, self.inner_rsc.get_url(canonical=True)])
 
     def can_connect_to(self, remote):

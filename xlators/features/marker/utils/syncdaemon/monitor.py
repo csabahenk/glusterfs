@@ -3,8 +3,31 @@ import sys
 import time
 import signal
 import logging
+import xml.etree.ElementTree as XET
+from subprocess import PIPE
+from resource import Popen, FILE, GLUSTER, SSH
 from gconf import gconf
-from syncdutils import update_file, select, waitpid, set_term_handler
+from syncdutils import update_file, select, waitpid, set_term_handler, is_host_local, GsyncdError
+
+def volumebricks(vol, host='localhost', prelude=[]):
+    po = Popen(prelude + ['gluster', '--xml', '--remote-host=' + host, 'volume', 'info', vol],
+               stdout=PIPE, stderr=PIPE)
+    vix = po.stdout.read()
+    po.wait()
+    po.terminate_geterr()
+    vi = XET.fromstring(vix)
+    if vi.find('opRet').text != '0':
+        if prelude:
+            via = '(via %s) ' % prelude.join(' ')
+        else:
+            via = ' '
+        raise GsyncdError('getting volume info of %s%s failed with errorcode %s',
+                          (vol, via, vi.find('opErrno').text))
+    def bparse(b):
+        host, dirp = b.text.split(':', 2)
+        return {'host': host, 'dir': dirp}
+    return [ bparse(b) for b in vi.findall('.//brick') ]
+
 
 class Monitor(object):
     """class which spawns and manages gsyncd workers"""
@@ -22,7 +45,7 @@ class Monitor(object):
         if getattr(gconf, 'state_file', None):
             update_file(gconf.state_file, lambda f: f.write(state + '\n'))
 
-    def monitor(self):
+    def monitor(self, wspx):
         """the monitor loop
 
         Basic logic is a blantantly simple blunt heuristics:
@@ -124,6 +147,45 @@ class Monitor(object):
         self.set_state('inconsistent')
         return ret
 
-def monitor():
+def distribute(*resources):
+    master, slave = resources
+    mbricks = volumebricks(master.volume, master.host)
+    logging.debug('master bricks: ' + repr(mbricks))
+    locmbricks = [ b['dir'] for b in mbricks if is_host_local(b['host']) ]
+    prelude  = []
+    si = slave
+    if isinstance(slave, SSH):
+        prelude = gconf.ssh_command.split() + [slave.remote_addr]
+        si = slave.inner_rsc
+        logging.debug('slave SSH gateway: ' + slave.remote_addr)
+    if isinstance(si, FILE):
+        sbricks = {'host': 'localhost', 'dir': si.path}
+    elif isinstance(si, GLUSTER):
+        sbricks = volumebricks(si.volume, si.host, prelude)
+    else:
+        raise GsyncdError("unkown slave type " + slave.url)
+    logging.info('slave bricks: ' + repr(sbricks))
+    if isinstance(si, FILE):
+        slaves = [ slave.url ]
+    else:
+        slavenodes = set(b['host'] for b in sbricks)
+        if isinstance(slave, SSH) and not gconf.isolated_slave:
+            rap = SSH.parse_ssh_address(slave.remote_addr)
+            slaves = [ 'ssh://' + rap['user'] + '@' + h + ':' + si.url for h in slavenodes ]
+        else:
+            slavevols = [ h + ':' + si.volume for h in slavenodes ]
+            if isinstance(slave, SSH):
+                slaves = [ 'ssh://' + rap.remote_addr + ':' + v for v in slavevols ]
+            else:
+                slaves = slavevols
+    locmbricks.sort()
+    slaves.sort()
+    workerspex = []
+    for i in range(len(locmbricks)):
+        workerspex.append((locmbricks[i], slaves[i % len(slaves)]))
+    logging.info('worker specs: ' + repr(workerspex))
+    return workerspex
+
+def monitor(*resources):
     """oh yeah, actually Monitor is used as singleton, too"""
-    return Monitor().monitor()
+    return Monitor().monitor(distribute(*resources))
