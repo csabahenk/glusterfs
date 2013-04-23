@@ -114,7 +114,7 @@ class NormalMixin(object):
         if xt == ENODATA or xt < self.volmark:
             if opts['create']:
                 xt = _xtime_now()
-                server.set_xtime(path, self.uuid, xt)
+                server.aggregated.set_xtime(path, self.uuid, xt)
             else:
                 xt = opts['default_xtime']
         return xt
@@ -243,7 +243,7 @@ class BlindMixin(object):
                 # from interrupted gsyncd transfer
                 logging.warn('have to fix up missing xtime on ' + path)
                 xt0 = _xtime_now()
-                server.set_xtime(path, self.uuid, xt0)
+                server.aggregated.set_xtime(path, self.uuid, xt0)
             else:
                 xt0 = opts['default_xtime']
             xt = (xt0, xt[1])
@@ -255,7 +255,7 @@ class BlindMixin(object):
 
     def volinfo_hook(self):
         res = _volinfo_hook_relax_foreign(self)
-        volinfo_r_new = self.slave.server.native_volume_info()
+        volinfo_r_new = self.slave.server.aggregated.native_volume_info()
         if volinfo_r_new['retval']:
             raise GsyncdError("slave is corrupt")
         if getattr(self, 'volinfo_r', None):
@@ -341,8 +341,8 @@ class GMasterBase(object):
 
         err out on multiple foreign masters
         """
-        fgn_vis, nat_vi = self.master.server.foreign_volume_infos(), \
-                          self.master.server.native_volume_info()
+        fgn_vis, nat_vi = self.master.server.aggregated.foreign_volume_infos(), \
+                          self.master.server.aggregated.native_volume_info()
         fgn_vi = None
         if fgn_vis:
             if len(fgn_vis) > 1:

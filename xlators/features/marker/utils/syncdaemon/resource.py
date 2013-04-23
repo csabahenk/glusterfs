@@ -250,6 +250,8 @@ class Server(object):
     FRGN_XTRA_FMT = "I"
     FRGN_FMTSTR = NTV_FMTSTR + FRGN_XTRA_FMT
 
+    local_path = ''
+
     def _pathguard(f):
         """decorator method that checks
         the path argument of the decorated
@@ -267,12 +269,14 @@ class Server(object):
             ps = path.split('/')
             if path[0] == '/' or '..' in ps:
                 raise ValueError('unsafe path')
+            a = list(a)
+            a[pi] = os.path.join(a[0].local_path, path)
             return f(*a)
         return ff
 
-    @staticmethod
+    @classmethod
     @_pathguard
-    def entries(path):
+    def entries(cls, path):
         """directory entries in an array"""
         # prevent symlinks being followed
         if not stat.S_ISDIR(os.lstat(path).st_mode):
@@ -402,9 +406,9 @@ class Server(object):
         for u,t in mark_dct.items():
             cls.set_xtime(path, u, t)
 
-    @staticmethod
+    @classmethod
     @_pathguard
-    def setattr(path, adct):
+    def setattr(cls, path, adct):
         """set file attributes
 
         @adct is a dict, where 'own', 'mode' and 'times'
@@ -873,7 +877,26 @@ class GLUSTER(AbstractUrl, SlaveLocal, SlaveRemote):
         - else do that's what's inherited
         """
         if args:
-            gmaster_builder()(self, args[0]).crawl_loop()
+            gmaster = gmaster_builder()(self, args[0])
+            m = gmaster.master
+            if gconf.local_path:
+                class brickserver(FILE.FILEServer):
+                    local_path = gconf.local_path
+                    aggregated = m.server
+                    @classmethod
+                    def entries(cls, path):
+                        e = super(brickserver, cls).entries(path)
+                        # on the brick don't mess with /.glusterfs
+                        if path == '.':
+                            try:
+                                e.remove('.glusterfs')
+                            except ValueError:
+                                pass
+                        return e
+                m.server = brickserver
+            else:
+                m.server.aggregated = m.server
+            gmaster.crawl_loop()
         else:
             sup(self, *args)
 
