@@ -151,6 +151,13 @@ class NormalMixin(object):
     def set_slave_xtime(self, path, mark):
         self.slave.server.set_xtime(path, self.uuid, mark)
 
+class PartialMixin(NormalMixin):
+    """a variant tuned towards operation with a master
+       that has partial info of the slave (brick typically)"""
+
+    def xtime_reversion_hook(self, path, xtl, xtr):
+        pass
+
 class WrapupMixin(NormalMixin):
     """a variant that differs from normal in terms
        of ignoring non-indexed files"""
