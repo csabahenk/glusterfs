@@ -34,6 +34,8 @@ static char *gsync_reserved_opts[] = {
         "state-socket-unencoded",
         "socketdir",
         "ignore-deletes",
+        "local-id",
+        "local-path",
         NULL
 };
 

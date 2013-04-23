@@ -166,6 +166,8 @@ def main_i():
     op.add_option('-r', '--remote-gsyncd', metavar='CMD',   default=os.path.abspath(sys.argv[0]))
     op.add_option('--volume-id',           metavar='UUID')
     op.add_option('--session-owner',       metavar='ID')
+    op.add_option('--local-id',            metavar='ID',    help=SUPPRESS_HELP, default='')
+    op.add_option('--local-path',          metavar='PATH',  help=SUPPRESS_HELP, default='')
     op.add_option('-s', '--ssh-command',   metavar='CMD',   default='ssh')
     op.add_option('--rsync-command',       metavar='CMD',   default='rsync')
     op.add_option('--rsync-options',       metavar='OPTS',  default='--sparse')
@@ -190,6 +192,8 @@ def main_i():
     op.add_option('-c', '--config-file',   metavar='CONF',  type=str, action='callback', callback=store_local)
     # duh. need to specify dest or value will be mapped to None :S
     op.add_option('--monitor', dest='monitor', action='callback', callback=store_local_curry(True))
+    op.add_option('--resource-local', dest='resource_local', type=str, action='callback', callback=store_local)
+    op.add_option('--resource-remote', dest='resource_remote', type=str, action='callback', callback=store_local)
     op.add_option('--feedback-fd', dest='feedback_fd', type=int, help=SUPPRESS_HELP, action='callback', callback=store_local)
     op.add_option('--listen', dest='listen', help=SUPPRESS_HELP,      action='callback', callback=store_local_curry(True))
     op.add_option('-N', '--no-daemon', dest="go_daemon",    action='callback', callback=store_local_curry('dont'))
@@ -226,6 +230,19 @@ def main_i():
     # values container.
     defaults = op.get_default_values()
     opts, args = op.parse_args(values=optparse.Values())
+    args_orig = args[:]
+    r = rconf.get('resource_local')
+    if r:
+        if len(args) == 0:
+            args.append(None)
+        args[0] = r
+    r = rconf.get('resource_remote')
+    if r:
+        if len(args) == 0:
+            raise GsyncdError('local resource unspecfied')
+        elif len(args) == 1:
+            args.append(None)
+        args[1] = r
     confdata = rconf.get('config')
     if not (len(args) == 2 or \
             (len(args) == 1 and rconf.get('listen')) or \
@@ -251,6 +268,17 @@ def main_i():
                                   (k, v))
 
     confrx = getattr(confdata, 'rx', None)
+    def makersc(aa, check=True):
+        if not aa:
+            return ([], None, None)
+        ra = [resource.parse_url(u) for u in aa]
+        local = ra[0]
+        remote = None
+        if len(ra) > 1:
+            remote = ra[1]
+        if check and not local.can_connect_to(remote):
+            raise GsyncdError("%s cannot work with %s" % (local.path, remote and remote.path))
+        return (ra, local, remote)
     if confrx:
         # peers are regexen, don't try to parse them
         if confrx == 'glob':
@@ -258,27 +286,20 @@ def main_i():
         canon_peers = args
         namedict = {}
     else:
-        rscs = [resource.parse_url(u) for u in args]
         dc = rconf.get('url_print')
+        rscs, local, remote = makersc(args_orig, not dc)
         if dc:
             for r in rscs:
                 print(r.get_url(**{'normal': {},
                                    'canon': {'canonical': True},
                                    'canon_esc': {'canonical': True, 'escaped': True}}[dc]))
             return
-        local = remote = None
-        if rscs:
-            local = rscs[0]
-            if len(rscs) > 1:
-                remote = rscs[1]
-            if not local.can_connect_to(remote):
-                raise GsyncdError("%s cannot work with %s" % (local.path, remote and remote.path))
         pa = ([], [], [])
         urlprms = ({}, {'canonical': True}, {'canonical': True, 'escaped': True})
         for x in rscs:
             for i in range(len(pa)):
                 pa[i].append(x.get_url(**urlprms[i]))
-        peers, canon_peers, canon_esc_peers = pa
+        _, canon_peers, canon_esc_peers = pa
         # creating the namedict, a dict representing various ways of referring to / repreenting
         # peers to be fillable in config templates
         mods = (lambda x: x, lambda x: x[0].upper() + x[1:], lambda x: 'e' + x[0].upper() + x[1:])
@@ -384,6 +405,7 @@ def main_i():
     go_daemon = rconf['go_daemon']
     be_monitor = rconf.get('monitor')
 
+    rscs, local, remote = makersc(args)
     if not be_monitor and isinstance(remote, resource.SSH) and \
        go_daemon == 'should':
         go_daemon = 'postconn'
@@ -394,7 +416,7 @@ def main_i():
         label = 'monitor'
     elif remote:
         #master
-        label = ''
+        label = gconf.local_path
     else:
         label = 'slave'
     startup(go_daemon=go_daemon, log_file=log_file, label=label)
@@ -403,7 +425,7 @@ def main_i():
     if be_monitor:
         return monitor(*rscs)
 
-    logging.info("syncing: %s" % " -> ".join(peers))
+    logging.info("syncing: %s" % " -> ".join(r.url for r in rscs))
     if remote:
         go_daemon = remote.connect_remote(go_daemon=go_daemon)
         if go_daemon:
