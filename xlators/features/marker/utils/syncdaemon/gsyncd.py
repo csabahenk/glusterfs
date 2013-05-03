@@ -165,6 +165,7 @@ def main_i():
     op.add_option('-L', '--log-level',     metavar='LVL')
     op.add_option('-r', '--remote-gsyncd', metavar='CMD',   default=os.path.abspath(sys.argv[0]))
     op.add_option('--volume-id',           metavar='UUID')
+    op.add_option('--slave-id',            metavar='ID')
     op.add_option('--session-owner',       metavar='ID')
     op.add_option('--local-id',            metavar='ID',    help=SUPPRESS_HELP, default='')
     op.add_option('--local-path',          metavar='PATH',  help=SUPPRESS_HELP, default='')

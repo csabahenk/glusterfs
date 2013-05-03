@@ -36,6 +36,7 @@ static char *gsync_reserved_opts[] = {
         "ignore-deletes",
         "local-id",
         "local-path",
+        "slave-id",
         NULL
 };
 

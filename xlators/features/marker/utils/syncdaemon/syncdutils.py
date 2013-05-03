@@ -329,3 +329,21 @@ def is_host_local(host):
             pass
         s.close()
     return locaddr
+
+def funcode(f):
+    fc = getattr(f, 'func_code', None)
+    if not fc:
+        # python 3
+        fc = f.__code__
+    return fc
+
+def memoize(f):
+    fc = funcode(f)
+    fn = fc.co_name
+    def ff(self, *a, **kw):
+        rv = getattr(self, '_' + fn, None)
+        if rv == None:
+            rv = f(self, *a, **kw)
+            setattr(self, '_' + fn, rv)
+        return rv
+    return ff

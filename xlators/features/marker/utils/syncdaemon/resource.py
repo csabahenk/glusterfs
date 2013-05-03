@@ -5,6 +5,7 @@ import stat
 import time
 import fcntl
 import errno
+import types
 import struct
 import socket
 import logging
@@ -19,7 +20,7 @@ import repce
 from repce import RepceServer, RepceClient
 from  master import gmaster_builder
 import syncdutils
-from syncdutils import GsyncdError, select, privileged, boolify
+from syncdutils import GsyncdError, select, privileged, boolify, funcode
 
 UrlRX  = re.compile('\A(\w+)://([^ *?[]*)\Z')
 HostRX = re.compile('[a-z\d](?:[a-z\d.-]*[a-z\d])?', re.I)
@@ -259,10 +260,7 @@ class Server(object):
         point out of the managed tree
         """
 
-        fc = getattr(f, 'func_code', None)
-        if not fc:
-            # python 3
-            fc = f.__code__
+        fc = funcode(f)
         pi = list(fc.co_varnames).index('path')
         def ff(*a):
             path = a[pi]
@@ -877,12 +875,11 @@ class GLUSTER(AbstractUrl, SlaveLocal, SlaveRemote):
         - else do that's what's inherited
         """
         if args:
-            gmaster = gmaster_builder()(self, args[0])
-            m = gmaster.master
+            slave = args[0]
             if gconf.local_path:
                 class brickserver(FILE.FILEServer):
                     local_path = gconf.local_path
-                    aggregated = m.server
+                    aggregated = self.server
                     @classmethod
                     def entries(cls, path):
                         e = super(brickserver, cls).entries(path)
@@ -893,9 +890,17 @@ class GLUSTER(AbstractUrl, SlaveLocal, SlaveRemote):
                             except ValueError:
                                 pass
                         return e
-                m.server = brickserver
+                if gconf.slave_id:
+                    # define {,set_}xtime in slave, thus preempting
+                    # the call to remote, so that it takes data from
+                    # the local brick
+                    slave.server.xtime = types.MethodType(lambda _self, path, uuid: brickserver.xtime(path, uuid + '.' + gconf.slave_id), slave.server)
+                    slave.server.set_xtime = types.MethodType(lambda _self, path, uuid, mark: brickserver.set_xtime(path, uuid + '.' + gconf.slave_id, mark), slave.server)
+                gmaster = gmaster_builder()(self, slave)
+                gmaster.master.server = brickserver
             else:
-                m.server.aggregated = m.server
+                gmaster = gmaster_builder()(self, slave)
+                gmaster.master.server.aggregated = gmaster.master.server
             gmaster.crawl_loop()
         else:
             sup(self, *args)

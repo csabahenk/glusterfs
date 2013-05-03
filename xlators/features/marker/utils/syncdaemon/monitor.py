@@ -3,32 +3,53 @@ import sys
 import time
 import signal
 import logging
+import uuid
 import xml.etree.ElementTree as XET
 from subprocess import PIPE
 from resource import Popen, FILE, GLUSTER, SSH
 from threading import Lock
 from gconf import gconf
 from syncdutils import update_file, select, waitpid, set_term_handler, is_host_local, GsyncdError
-from syncdutils import escape, Thread, finalize
+from syncdutils import escape, Thread, finalize, memoize
 
-def volumebricks(vol, host='localhost', prelude=[]):
-    po = Popen(prelude + ['gluster', '--xml', '--remote-host=' + host, 'volume', 'info', vol],
-               stdout=PIPE, stderr=PIPE)
-    vix = po.stdout.read()
-    po.wait()
-    po.terminate_geterr()
-    vi = XET.fromstring(vix)
-    if vi.find('opRet').text != '0':
-        if prelude:
-            via = '(via %s) ' % prelude.join(' ')
-        else:
-            via = ' '
-        raise GsyncdError('getting volume info of %s%s failed with errorcode %s',
-                          (vol, via, vi.find('opErrno').text))
-    def bparse(b):
-        host, dirp = b.text.split(':', 2)
-        return {'host': host, 'dir': dirp}
-    return [ bparse(b) for b in vi.findall('.//brick') ]
+class Volinfo(object):
+    def __init__(self, vol, host='localhost', prelude=[]):
+        po = Popen(prelude + ['gluster', '--xml', '--remote-host=' + host, 'volume', 'info', vol],
+                   stdout=PIPE, stderr=PIPE)
+        vix = po.stdout.read()
+        po.wait()
+        po.terminate_geterr()
+        vi = XET.fromstring(vix)
+        if vi.find('opRet').text != '0':
+            if prelude:
+                via = '(via %s) ' % prelude.join(' ')
+            else:
+                via = ' '
+            raise GsyncdError('getting volume info of %s%s failed with errorcode %s',
+                              (vol, via, vi.find('opErrno').text))
+        self.tree = vi
+        self.volume = vol
+        self.host = host
+
+    def get(self, elem):
+        return self.tree.findall('.//' + elem)
+
+    @property
+    @memoize
+    def bricks(self):
+        def bparse(b):
+            host, dirp = b.text.split(':', 2)
+            return {'host': host, 'dir': dirp}
+        return [ bparse(b) for b in self.get('brick') ]
+
+    @property
+    @memoize
+    def uuid(self):
+        ids = self.get('id')
+        if len(ids) != 1:
+            raise GsyncdError("volume info of %s obtained from %s: ambiguous uuid",
+                              self.volume, self.host)
+        return ids[0].text
 
 
 class Monitor(object):
@@ -154,7 +175,7 @@ class Monitor(object):
         self.set_state(self.ST_INCON, w)
         return ret
 
-    def multiplex(self, wspx):
+    def multiplex(self, wspx, suuid):
         def sigcont_handler(*a):
             """
             Re-init logging and send group kill signal
@@ -172,7 +193,7 @@ class Monitor(object):
         for o in ('-N', '--no-daemon', '--monitor'):
             while o in argv:
                 argv.remove(o)
-        argv.extend(('-N', '-p', ''))
+        argv.extend(('-N', '-p', '', '--slave-id', suuid))
         argv.insert(0, os.path.basename(sys.executable))
 
         cpids = set()
@@ -195,9 +216,9 @@ class Monitor(object):
 
 def distribute(*resources):
     master, slave = resources
-    mbricks = volumebricks(master.volume, master.host)
-    logging.debug('master bricks: ' + repr(mbricks))
-    locmbricks = [ b['dir'] for b in mbricks if is_host_local(b['host']) ]
+    mvol = Volinfo(master.volume, master.host)
+    logging.debug('master bricks: ' + repr(mvol.bricks))
+    locmbricks = [ b['dir'] for b in mvol.bricks if is_host_local(b['host']) ]
     prelude  = []
     si = slave
     if isinstance(slave, SSH):
@@ -206,8 +227,11 @@ def distribute(*resources):
         logging.debug('slave SSH gateway: ' + slave.remote_addr)
     if isinstance(si, FILE):
         sbricks = {'host': 'localhost', 'dir': si.path}
+        suuid = uuid.uuid5(uuid.NAMESPACE_URL, slave.get_url(canonical=True))
     elif isinstance(si, GLUSTER):
-        sbricks = volumebricks(si.volume, si.host, prelude)
+        svol = Volinfo(si.volume, si.host, prelude)
+        sbricks = svol.bricks
+        suuid = svol.uuid
     else:
         raise GsyncdError("unkown slave type " + slave.url)
     logging.info('slave bricks: ' + repr(sbricks))
@@ -230,8 +254,8 @@ def distribute(*resources):
     for i in range(len(locmbricks)):
         workerspex.append((locmbricks[i], slaves[i % len(slaves)]))
     logging.info('worker specs: ' + repr(workerspex))
-    return workerspex
+    return workerspex, suuid
 
 def monitor(*resources):
     """oh yeah, actually Monitor is used as singleton, too"""
-    return Monitor().multiplex(distribute(*resources))
+    return Monitor().multiplex(*distribute(*resources))
