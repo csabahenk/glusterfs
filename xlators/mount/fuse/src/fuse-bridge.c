@@ -152,6 +152,26 @@ out:
         return fdctx;
 }
 
+
+struct fdump_timespec {
+        uint64_t sec;
+        uint32_t nsec;
+        uint32_t padding;
+};
+
+static void
+fdump_gettime (struct fdump_timespec *fts)
+{
+        struct timespec ts = {0,};
+
+        clock_gettime (CLOCK_REALTIME, &ts);
+
+        fts->sec  = ts.tv_sec;
+        fts->nsec = ts.tv_nsec;
+}
+
+static uint32_t fusedump_header_size = sizeof (uint32_t) + sizeof (uint64_t) + sizeof (uint32_t);
+
 /*
  * iov_out should contain a fuse_out_header at zeroth position.
  * The error value of this header is sent to kernel.
@@ -186,9 +206,16 @@ send_fuse_iov (xlator_t *this, fuse_in_header_t *finh, struct iovec *iov_out,
 
         if (priv->fuse_dump_fd != -1) {
                 char w = 'W';
+                struct iovec diov[3];
+                struct fdump_timespec fts = {0,};
+
+                fdump_gettime (&fts);
+                diov[0] = (struct iovec){ &w, 1 };
+                diov[1] = (struct iovec){ &fusedump_header_size, 4 };
+                diov[2] = (struct iovec){ &fts, 8 + 4 };
 
                 pthread_mutex_lock (&priv->fuse_dump_mutex);
-                res = write (priv->fuse_dump_fd, &w, 1);
+                res = writev (priv->fuse_dump_fd, diov, 3);
                 if (res != -1)
                         res = writev (priv->fuse_dump_fd, iov_out, count);
                 pthread_mutex_unlock (&priv->fuse_dump_mutex);
@@ -5028,26 +5055,26 @@ static fuse_handler_t *fuse_std_ops[FUSE_OP_HIGH] = {
 
 static fuse_handler_t *fuse_dump_ops[FUSE_OP_HIGH];
 
-
 static void
 fuse_dumper (xlator_t *this, fuse_in_header_t *finh, void *msg)
 {
         fuse_private_t *priv = NULL;
-        struct iovec diov[3];
+        struct iovec diov[5];
         char r = 'R';
         int ret = 0;
+        struct fdump_timespec fts = {0,};
 
         priv = this->private;
 
-        diov[0].iov_base = &r;
-        diov[0].iov_len  = 1;
-        diov[1].iov_base = finh;
-        diov[1].iov_len  = sizeof (*finh);
-        diov[2].iov_base = msg;
-        diov[2].iov_len  = finh->len - sizeof (*finh);
+        fdump_gettime (&fts);
+        diov[0] = (struct iovec){ &r, 1 };
+        diov[1] = (struct iovec){ &fusedump_header_size, 4 };
+        diov[2] = (struct iovec){ &fts, 8+4 };
+        diov[3] = (struct iovec){ finh, sizeof (*finh) };
+        diov[4] = (struct iovec){ msg, finh->len - sizeof (*finh) };
 
         pthread_mutex_lock (&priv->fuse_dump_mutex);
-        ret = writev (priv->fuse_dump_fd, diov, 3);
+        ret = writev (priv->fuse_dump_fd, diov, 5);
         pthread_mutex_unlock (&priv->fuse_dump_mutex);
         if (ret == -1)
                 gf_log ("glusterfs-fuse", GF_LOG_ERROR,
